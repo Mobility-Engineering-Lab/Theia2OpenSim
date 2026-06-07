@@ -19,6 +19,7 @@ from workflow_utils import (
 
 
 def parse_args() -> argparse.Namespace:
+    # Default paths point to the bundled sample data so the script works out of the box.
     default_c3d = Path(__file__).resolve().parents[2] / "sample_data" / "Lwalking7.c3d"
     default_out = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim" / "OS_from_script.mot"
 
@@ -39,15 +40,18 @@ def main() -> int:
         print(f"[FAIL] C3D file not found: {args.c3d}")
         return 1
 
+    # Load the C3D input and confirm the segment labels needed by the workflow.
     c3d_obj = load_theia_c3d(args.c3d)
     labels = get_rotation_labels(c3d_obj)
     missing = find_missing_labels(labels, REQUIRED_ROTATION_LABELS)
     if missing:
+        # Stop early if the source file does not contain the segment set we expect.
         print("[FAIL] Missing required rotation labels:")
         for label in missing:
             print(f"  - {label}")
         return 1
 
+    # Build the OpenSim table, optionally trim zero-only edges, then validate it.
     frame_rate, _ = get_frame_rate_and_count(c3d_obj)
     df = build_mot_dataframe(c3d_obj)
 
@@ -61,6 +65,7 @@ def main() -> int:
             print(f"  - {issue}")
         return 1
 
+    # Write the final OpenSim motion file to the requested location.
     out_path = write_mot(df, args.output_mot)
     print(f"[PASS] Wrote OpenSim MOT file: {out_path}")
     print(f"- Rows: {df.shape[0]}")
