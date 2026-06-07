@@ -1,10 +1,10 @@
-# theia2opensim
+# Theia2OpenSim
 
-**theia2opensim** converts Theia3D markerless motion-capture outputs into OpenSim-compatible files for biomechanical analysis.
+**Theia2OpenSim** is a Python toolbox for scaling OpenSim models and driving them with Theia3D markerless motion-capture outputs.
 
 ## Status
 
-This repository started as a notebook-based workflow and now includes script-based Python tools under `src/Python` for reproducible validation and export.
+This repository started as a notebook-based workflow and now includes script-based Python tools under `src/Python` for reproducible validation, model scaling support, and motion export.
 
 ## Current capabilities
 
@@ -107,7 +107,6 @@ If you want to contribute, open an issue with:
 ## Citation
 
 If you use this toolbox in research, please cite the associated manuscript/communication when available.
-
 
 ## License
 

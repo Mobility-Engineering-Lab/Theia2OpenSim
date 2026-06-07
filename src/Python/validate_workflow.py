@@ -17,6 +17,7 @@ from workflow_utils import (
 
 
 def parse_args() -> argparse.Namespace:
+    # Use the bundled sample file unless the user explicitly points to another C3D.
     default_c3d = Path(__file__).resolve().parents[2] / "sample_data" / "Lwalking7.c3d"
     parser = argparse.ArgumentParser(description="Validate Theia3D-to-OpenSim workflow.")
     parser.add_argument("--c3d", type=Path, default=default_c3d, help="Path to Theia3D C3D file.")
@@ -29,11 +30,13 @@ def main() -> int:
         print(f"[FAIL] C3D file not found: {args.c3d}")
         return 1
 
+    # Load the sample file and confirm the required Theia rotation labels exist.
     c3d_obj = load_theia_c3d(args.c3d)
     labels = get_rotation_labels(c3d_obj)
     missing = find_missing_labels(labels, REQUIRED_ROTATION_LABELS)
     frame_rate, total_frames = get_frame_rate_and_count(c3d_obj)
 
+    # Print a compact summary so validation is easy to scan from the terminal.
     print("Validation summary")
     print(f"- Input file: {args.c3d}")
     print(f"- Frame rate: {frame_rate:.3f} Hz")
@@ -46,6 +49,7 @@ def main() -> int:
             print(f"  - {label}")
         return 1
 
+    # Build the motion table and check it for basic integrity issues.
     df = build_mot_dataframe(c3d_obj)
     issues = validate_mot_dataframe(df)
 
