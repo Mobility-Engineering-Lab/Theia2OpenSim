@@ -25,13 +25,18 @@ Theia2OpenSim/
 ├── notebook/
 │   └── Angle Calculator.ipynb
 ├── sample_data/
+│   ├── gait2392_simbody.osim
+│   ├── gait2392_simbody_scaled.osim
 │   ├── Lwalking7.c3d
 │   ├── markerstheia.xml
+│   ├── Scaling_Setup.xml
 │   └── OpenSim/
-│       └── README.md
+│       ├── OPENSIM_OUTPUTS.md
+│       ├── OS_from_script.mot
+│       └── static_from_script.trc
 └── src/
     ├── Python/
-    │   ├── README.md
+  │   ├── PYTHON_TOOLBOX.md
     │   ├── workflow_utils.py
     │   ├── validate_workflow.py
     │   └── run_pipeline.py
@@ -94,6 +99,7 @@ python src/Python/run_pipeline.py \
 - Marker definition file: `sample_data/markerstheia.xml`
 - Script output folder: `sample_data/OpenSim/`
 - Static `.trc` virtual markers are mapped from Theia segment origins for OpenSim scaling
+- OpenSim sample model/setup assets are provided under `sample_data/`
 
 ## MATLAB path
 
