@@ -12,12 +12,13 @@ This repository started as a notebook-based workflow and now includes script-bas
 - Extract segment pose matrices and sanitize missing values
 - Compute pelvis, hip, knee, ankle, and lumbar kinematics
 - Build OpenSim-compatible `.mot` tables
+- Generate static OpenSim-compatible `.trc` files for model scaling
 - Validate the workflow against required Theia rotation labels
 
 ## Repository structure (current)
 
 ```text
-theia2opensim/
+Theia2OpenSim/
 ├── README.md
 ├── LICENSE
 ├── environment.yml
@@ -77,10 +78,22 @@ Optional trimming of leading/trailing zeros:
 python src/Python/run_pipeline.py --trim-zeros
 ```
 
+Generate `.mot` and static `.trc` in one run:
+
+```bash
+python src/Python/run_pipeline.py \
+  --c3d sample_data/Lwalking7.c3d \
+  --output-mot sample_data/OpenSim/OS_from_script.mot \
+  --static-c3d sample_data/Lwalking7.c3d \
+  --static-frames 290:310 \
+  --output-trc sample_data/OpenSim/static_from_script.trc
+```
+
 ## OpenSim files
 
 - Marker definition file: `sample_data/markerstheia.xml`
 - Script output folder: `sample_data/OpenSim/`
+- Static `.trc` virtual markers are mapped from Theia segment origins for OpenSim scaling
 
 ## MATLAB path
 
@@ -115,3 +128,22 @@ MIT License.
 ## Disclaimer
 
 This toolbox is for research use. Users must verify coordinate transforms and exported OpenSim files before scientific or clinical interpretation.
+
+## Example commands
+
+Dynamic `.mot` only:
+
+```bash
+python src/Python/run_pipeline.py --c3d sample_data/Lwalking7.c3d --output-mot sample_data/OpenSim/OS_from_script.mot
+```
+
+Dynamic `.mot` plus static `.trc`:
+
+```bash
+python src/Python/run_pipeline.py \
+  --c3d sample_data/Lwalking7.c3d \
+  --output-mot sample_data/OpenSim/OS_from_script.mot \
+  --static-c3d sample_data/Lwalking7.c3d \
+  --static-frames 290:310 \
+  --output-trc sample_data/OpenSim/static_from_script.trc
+```
