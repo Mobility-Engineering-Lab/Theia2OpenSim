@@ -17,8 +17,9 @@ from workflow_utils import (
 
 
 def parse_args() -> argparse.Namespace:
-    # Use the bundled sample file unless the user explicitly points to another C3D.
-    default_c3d = Path(__file__).resolve().parents[2] / "sample_data" / "Lwalking7.c3d"
+    # USER: replace the path below with your own C3D file,
+    #       or pass it on the command line: --c3d "C:/MyData/trial01.c3d"
+    default_c3d = Path(__file__).resolve().parents[2] / "sample_data" / "Walking.c3d"
     parser = argparse.ArgumentParser(description="Validate Theia3D-to-OpenSim workflow.")
     parser.add_argument("--c3d", type=Path, default=default_c3d, help="Path to Theia3D C3D file.")
     return parser.parse_args()
