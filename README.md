@@ -11,7 +11,7 @@ This repository started as a notebook-based workflow and now includes script-bas
 - Read Theia3D-exported C3D files
 - Extract segment pose matrices and sanitize missing values
 - Compute pelvis, hip, knee, ankle, and lumbar kinematics
-- Build OpenSim-compatible `.mot` tables
+- Build OpenSim-compatible `.mot` tables with full pelvis translation (`pelvis_tx`, `pelvis_ty`, `pelvis_tz`)
 - Generate static OpenSim-compatible `.trc` files for model scaling
 - Validate the workflow against required Theia rotation labels
 
@@ -25,12 +25,13 @@ Theia2OpenSim/
 ├── notebook/
 │   ├── Angle Calculator.ipynb
 │   ├── OS.mot
-│   ├── joint_centers_1.mat
+│   ├── joint_centers.mat
 │   └── static1.trc
 ├── sample_data/
 │   ├── gait2392_simbody.osim
 │   ├── gait2392_simbody_scaled.osim
-│   ├── Lwalking7.c3d
+│   ├── Walking.c3d
+│   ├── Static.c3d
 │   ├── markerstheia.xml
 │   ├── Scaling_Setup.xml
 │   └── OpenSim/
@@ -74,7 +75,7 @@ Expected behavior:
 
 ## Run conversion pipeline
 
-Generate an OpenSim `.mot` file from the sample C3D:
+Generate an OpenSim `.mot` file from the sample dynamic trial:
 
 ```bash
 python src/Python/run_pipeline.py --output-mot sample_data/OpenSim/OS_from_script.mot
@@ -86,13 +87,22 @@ Optional trimming of leading/trailing zeros:
 python src/Python/run_pipeline.py --trim-zeros
 ```
 
-Generate `.mot` and static `.trc` in one run:
+Generate `.mot` and static `.trc` using the dedicated static C3D:
 
 ```bash
 python src/Python/run_pipeline.py \
-  --c3d sample_data/Lwalking7.c3d \
+  --c3d sample_data/Walking.c3d \
   --output-mot sample_data/OpenSim/OS_from_script.mot \
-  --static-c3d sample_data/Lwalking7.c3d \
+  --static-c3d sample_data/Static.c3d \
+  --output-trc sample_data/OpenSim/static_from_script.trc
+```
+
+Generate `.mot` and static `.trc` using selected frames from the dynamic trial instead:
+
+```bash
+python src/Python/run_pipeline.py \
+  --c3d sample_data/Walking.c3d \
+  --output-mot sample_data/OpenSim/OS_from_script.mot \
   --static-frames 290:310 \
   --output-trc sample_data/OpenSim/static_from_script.trc
 ```
@@ -143,16 +153,25 @@ This toolbox is for research use. Users must verify coordinate transforms and ex
 Dynamic `.mot` only:
 
 ```bash
-python src/Python/run_pipeline.py --c3d sample_data/Lwalking7.c3d --output-mot sample_data/OpenSim/OS_from_script.mot
+python src/Python/run_pipeline.py --c3d sample_data/Walking.c3d --output-mot sample_data/OpenSim/OS_from_script.mot
 ```
 
-Dynamic `.mot` plus static `.trc`:
+Dynamic `.mot` plus static `.trc` from dedicated static trial:
 
 ```bash
 python src/Python/run_pipeline.py \
-  --c3d sample_data/Lwalking7.c3d \
+  --c3d sample_data/Walking.c3d \
   --output-mot sample_data/OpenSim/OS_from_script.mot \
-  --static-c3d sample_data/Lwalking7.c3d \
+  --static-c3d sample_data/Static.c3d \
+  --output-trc sample_data/OpenSim/static_from_script.trc
+```
+
+Dynamic `.mot` plus static `.trc` from frames within the dynamic trial:
+
+```bash
+python src/Python/run_pipeline.py \
+  --c3d sample_data/Walking.c3d \
+  --output-mot sample_data/OpenSim/OS_from_script.mot \
   --static-frames 290:310 \
   --output-trc sample_data/OpenSim/static_from_script.trc
 ```

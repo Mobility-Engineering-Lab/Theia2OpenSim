@@ -147,8 +147,10 @@ def build_mot_dataframe(c3d_obj: Dict) -> pd.DataFrame:
         "hip_rotation_l": np.round(hip_angles_l[2, 0, :], 2),
         "knee_angle_l": np.round(knee_angles_l[0, 0, :], 2),
         "ankle_angle_l": np.round(ankle_angles_l[0, 0, :], 2),
-        # Convert pelvis translation from millimeters to meters for OpenSim.
+        # Pelvis translations: convert mm to m. Axis mapping Theia→OpenSim: Y→X, Z→Y, X→Z.
+        "pelvis_tx": np.round(pelvis[1, 3, :] / 1000.0, 2),
         "pelvis_ty": np.round(pelvis[2, 3, :] / 1000.0, 2),
+        "pelvis_tz": np.round(pelvis[0, 3, :] / 1000.0, 2),
         "lumbar_bending": np.round(lumbar_angles[0, 0, :], 2),
         "lumbar_rotation": np.round(lumbar_angles[2, 0, :], 2),
         "lumbar_extension": np.round(lumbar_angles[1, 0, :], 2),
