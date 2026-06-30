@@ -23,7 +23,10 @@ Theia2OpenSim/
 ├── LICENSE
 ├── environment.yml
 ├── notebook/
-│   └── Angle Calculator.ipynb
+│   ├── Angle Calculator.ipynb
+│   ├── OS.mot
+│   ├── joint_centers_1.mat
+│   └── static1.trc
 ├── sample_data/
 │   ├── gait2392_simbody.osim
 │   ├── gait2392_simbody_scaled.osim
@@ -36,7 +39,7 @@ Theia2OpenSim/
 │       └── static_from_script.trc
 └── src/
     ├── Python/
-  │   ├── PYTHON_TOOLBOX.md
+    │   ├── PYTHON_TOOLBOX.md
     │   ├── workflow_utils.py
     │   ├── validate_workflow.py
     │   └── run_pipeline.py
@@ -48,11 +51,11 @@ Theia2OpenSim/
 
 A conda environment file is included at `environment.yml`.
 
-Create the environment:
+Create the environment (the `-n` override names it `Theia2OpenSim`; omit it to use the lowercase `theia2opensim` name defined in the file):
 
 ```bash
-conda env create -f environment.yml
-conda activate theia2opensim
+conda env create -f environment.yml -n Theia2OpenSim
+conda activate Theia2OpenSim
 ```
 
 ## Workflow validation
