@@ -1,0 +1,39 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: Theia2OpenSim
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Komal
+    family-names: Azeem
+    email: komal.azeem@queensu.ca
+    affiliation: Queen's University
+  - given-names: Xiong
+    family-names: Zhao
+    email: xiong.zhao@accmov.com
+    affiliation: AccMov Health Inc.
+    orcid: 'https://orcid.org/0000-0002-9367-6565'
+  - given-names: Pouya
+    family-names: Amiri
+    email: p.amiri@queensu.ca
+    affiliation: Queen's University
+identifiers:
+  - type: url
+    value: >-
+      https://github.com/Xiong-biomech/Theia2OpenSim/releases/tag/v1.0.0-alpha
+repository-code: 'https://github.com/Xiong-biomech/Theia2OpenSim'
+abstract: >-
+  A Python toolbox for converting Theia3D markerless
+  motion-capture outputs into OpenSim-compatible .mot and
+  .trc files, scaling generic OpenSim models, and supporting
+  markerless musculoskeletal modelling workflows.
+keywords:
+  - markerless
+  - OpenSim
+  - Theia3D
+  - Simulation
+license: MIT
