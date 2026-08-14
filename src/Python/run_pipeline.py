@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 from pathlib import Path
 
+from opensim_scaling import run_scale_tool, write_scale_setup_xml
 from workflow_utils import (
     REQUIRED_ROTATION_LABELS,
     build_mot_dataframe,
     find_missing_labels,
     get_frame_rate_and_count,
     get_rotation_labels,
+    get_segment_reference_pose,
     load_theia_c3d,
     parse_frame_indices,
     trim_dataframe,
@@ -28,7 +32,11 @@ def parse_args() -> argparse.Namespace:
     # -------------------------------------------------------------------------
     default_c3d         = Path(__file__).resolve().parents[2] / "sample_data" / "Walking.c3d"
     default_out         = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim" / "OS_from_script.mot"
-    default_static_trc  = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim" / "static_from_script.trc"
+    default_static_c3d  = Path(__file__).resolve().parents[2] / "sample_data" / "Static.c3d"
+    default_static_trc  = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim" / "Static.trc"
+    default_scale_model = Path(__file__).resolve().parents[2] / "sample_data" / "gait2392_simbody.osim"
+    default_marker_set  = Path(__file__).resolve().parents[2] / "sample_data" / "markerstheia.xml"
+    default_output_osim = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim" / "scaled_model.osim"
 
     parser = argparse.ArgumentParser(description="Convert Theia3D C3D data into an OpenSim MOT file.")
     parser.add_argument("--c3d", type=Path, default=default_c3d,
@@ -40,13 +48,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--static-c3d",
         type=Path,
-        default=None,
+        default=default_static_c3d,
         # USER: set to your dedicated static C3D file, e.g. "sample_data/Static.c3d".
-        #       If you don't have a separate static trial, omit this and use --static-frames instead.
+        #       Pass --no-static-c3d if you don't have one and want --static-frames
+        #       (taken from the dynamic trial) instead.
         help=(
-            "Path to a dedicated static C3D file for TRC generation. "
-            "If omitted but --static-frames is given, frames are taken from the dynamic trial."
+            "Path to a dedicated static C3D file for TRC generation and scaling. "
+            f"Defaults to {default_static_c3d}."
         ),
+    )
+    parser.add_argument(
+        "--no-static-c3d",
+        action="store_true",
+        help="Ignore --static-c3d's default; use --static-frames against the dynamic trial "
+             "instead, or produce .mot only if --static-frames is also omitted.",
     )
     parser.add_argument(
         "--static-frames",
@@ -63,11 +78,33 @@ def parse_args() -> argparse.Namespace:
                         help="Output static .trc file path.")
     parser.add_argument("--repeat-static-frames", type=int, default=6,
                         help="Number of repeated frames written to the static .trc file.")
+    parser.add_argument("--no-scale", action="store_true",
+                        help="Skip running OpenSim's Scale Tool. By default, the Scale Tool runs "
+                             "automatically (via opensim-cmd) whenever a static source is given "
+                             "(--static-c3d or --static-frames); pass this to opt out.")
+    parser.add_argument("--scale-model", type=Path, default=default_scale_model,
+                        help="Generic (unscaled) .osim model file to scale.")
+    parser.add_argument("--marker-set", type=Path, default=default_marker_set,
+                        help="OpenSim MarkerSet .xml file matching DEFAULT_TRC_MARKER_SEGMENT_MAP's marker names.")
+    parser.add_argument("--output-osim", type=Path, default=default_output_osim,
+                        help="Output scaled .osim model file path.")
+    parser.add_argument("--subject-mass", type=float, default=75.1646,
+                        help="Subject mass in kg, written into the ScaleTool setup (informational + mass distribution).")
+    parser.add_argument(
+        "--opensim-cmd",
+        type=Path,
+        default=None,
+        # USER: point this at OpenSim's bin/opensim-cmd(.exe), or set the
+        #       OPENSIM_CMD environment variable instead.
+        help="Path to opensim-cmd(.exe). Falls back to $OPENSIM_CMD, then PATH.",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.no_static_c3d:
+        args.static_c3d = None
 
     # -------------------------------------------------------------------
     # Step 1: Resolve static configuration first (mirrors the notebook,
@@ -117,14 +154,41 @@ def main() -> int:
     frame_rate, _ = get_frame_rate_and_count(c3d_obj)
 
     # -------------------------------------------------------------------
-    # Step 3: Write the static TRC, falling back to the dynamic trial as
-    # the source when no dedicated static C3D was provided.
+    # Step 3: Resolve the static source, falling back to the dynamic trial
+    # when no dedicated static C3D was provided. Used both for the optional
+    # TRC export below and for the pelvis reference pose.
     # -------------------------------------------------------------------
-    if want_static:
-        if static_c3d_obj is None:
-            static_c3d_obj = c3d_obj
-            static_source_label = f"{args.c3d} (dynamic trial)"
+    if static_c3d_obj is None:
+        static_c3d_obj = c3d_obj
+        static_source_label = f"{args.c3d} (dynamic trial)"
 
+    # -------------------------------------------------------------------
+    # Step 3a: Resolve a pelvis reference pose. Pelvis tilt/list/rotation
+    # are computed relative to this pose instead of Theia's raw absolute
+    # rotation -- a pelvis orientation genuinely ~180 degrees from Theia's
+    # identity frame has no Euler representation that fits gait2392's
+    # declared +/-90 degree range for pelvis_tilt/list, so it must be
+    # re-referenced, not just reformatted. Uses --static-c3d / --static-frames
+    # when given; otherwise falls back to the middle frame of the dynamic
+    # trial (always in range, verified to remove the wrap and the out-of-range
+    # values across the test trials). Computed before the static TRC below so
+    # the TRC's marker positions and the coordinate .mot used for scaling can
+    # share the same reference frame -- see write_static_trc_from_c3d.
+    # -------------------------------------------------------------------
+    if args.static_c3d is not None or args.static_frames is not None:
+        reference_frame_indices = parse_frame_indices(static_frames_spec)
+    else:
+        _, dynamic_total_frames = get_frame_rate_and_count(c3d_obj)
+        reference_frame_indices = [dynamic_total_frames // 2]
+
+    pelvis_reference_pose = get_segment_reference_pose(
+        static_c3d_obj, "pelvis_4X4", reference_frame_indices
+    )
+    print(f"- Pelvis reference source: {static_source_label}")
+    print(f"- Pelvis reference frame(s): {[int(idx) for idx in reference_frame_indices]}")
+    print("")
+
+    if want_static:
         frame_indices = parse_frame_indices(static_frames_spec)
 
         trc_path = write_static_trc_from_c3d(
@@ -132,6 +196,7 @@ def main() -> int:
             output_path=args.output_trc,
             frame_indices=frame_indices,
             repeat_frames=args.repeat_static_frames,
+            reference_pose=pelvis_reference_pose,
         )
 
         print(f"[PASS] Wrote OpenSim static TRC file: {trc_path}")
@@ -141,10 +206,57 @@ def main() -> int:
         print("")
 
     # -------------------------------------------------------------------
+    # Step 3b: Run OpenSim's Scale Tool whenever a static source was given
+    # (opt out with --no-scale). Needs a coordinate .mot describing the same
+    # static pose as the TRC above -- built here from static_c3d_obj using
+    # the same pelvis_reference_pose, so both inputs to MarkerPlacer's IK
+    # describe one consistent pose (see write_static_trc_from_c3d /
+    # extract_virtual_marker_positions). A missing opensim-cmd is a warning,
+    # not a hard failure, since the .mot export below doesn't depend on it.
+    # -------------------------------------------------------------------
+    if want_static and not args.no_scale:
+        opensim_cmd = args.opensim_cmd or os.environ.get("OPENSIM_CMD")
+        resolved_opensim_cmd = str(opensim_cmd) if opensim_cmd is not None else shutil.which("opensim-cmd")
+
+        if not resolved_opensim_cmd or not Path(resolved_opensim_cmd).exists():
+            print("[SKIP] Scale Tool: opensim-cmd not found. Pass --opensim-cmd, set OPENSIM_CMD, "
+                  "or add --no-scale to silence this.")
+            print("")
+        else:
+            static_frame_rate, _ = get_frame_rate_and_count(static_c3d_obj)
+            static_df = build_mot_dataframe(static_c3d_obj, pelvis_reference_pose=pelvis_reference_pose)
+            static_coords_path = args.output_osim.with_name(args.output_osim.stem + "_static_coords.mot")
+            write_mot(static_df, static_coords_path)
+
+            setup_xml_path = args.output_osim.with_name(args.output_osim.stem + "_Scaling_Setup.xml")
+            time_range = (0.0, (args.repeat_static_frames - 1) / static_frame_rate)
+            write_scale_setup_xml(
+                output_xml_path=setup_xml_path,
+                model_file=args.scale_model,
+                marker_set_file=args.marker_set,
+                marker_file=args.output_trc,
+                coordinate_file=static_coords_path,
+                output_model_file=args.output_osim,
+                time_range=time_range,
+                mass=args.subject_mass,
+            )
+
+            result = run_scale_tool(setup_xml_path, args.output_osim, opensim_cmd=resolved_opensim_cmd)
+
+            if result.success:
+                print(f"[PASS] Wrote scaled OpenSim model: {result.output_model_file}")
+                if result.marker_rms is not None:
+                    print(f"- Marker error: RMS = {result.marker_rms:.4f} m, max = {result.marker_max:.4f} m ({result.marker_max_name})")
+            else:
+                print("[FAIL] OpenSim Scale Tool did not complete successfully:")
+                print(result.stdout)
+            print("")
+
+    # -------------------------------------------------------------------
     # Step 4: Build the dynamic motion table, optionally trim zero-only
     # edges, then validate and export.
     # -------------------------------------------------------------------
-    df = build_mot_dataframe(c3d_obj)
+    df = build_mot_dataframe(c3d_obj, pelvis_reference_pose=pelvis_reference_pose)
 
     if args.trim_zeros:
         df = trim_dataframe(df, frame_rate=frame_rate)
