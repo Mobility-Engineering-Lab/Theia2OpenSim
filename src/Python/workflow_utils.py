@@ -55,6 +55,21 @@ def _rotation_data_transposed(c3d_obj: Dict) -> np.ndarray:
     return np.transpose(rotation_data, (2, 0, 1, 3))
 
 
+def _translation_scale_to_mm(c3d_obj: Dict) -> float:
+    # Segment pose translations follow whatever length unit POINT:UNITS declares
+    # (Theia doesn't expose a separate ROTATION:UNITS). Some exports are 'mm',
+    # others are 'm' -- the rest of this module assumes millimeters throughout
+    # (matches the .trc convention and the mm->m divisions in build_mot_dataframe),
+    # so normalize to mm here, once, at the source.
+    units = c3d_obj["parameters"]["POINT"]["UNITS"]["value"]
+    unit = str(units[0]).strip().lower() if len(units) else "mm"
+    if unit == "mm":
+        return 1.0
+    if unit == "m":
+        return 1000.0
+    raise WorkflowValidationError(f"Unsupported POINT:UNITS '{unit}' (expected 'mm' or 'm').")
+
+
 def get_segment_pose(c3d_obj: Dict, segment_label: str) -> np.ndarray:
     labels = get_rotation_labels(c3d_obj)
     if segment_label not in labels:
@@ -67,6 +82,7 @@ def get_segment_pose(c3d_obj: Dict, segment_label: str) -> np.ndarray:
     # Replace NaNs with zeros and force a valid homogeneous transform row.
     pose = np.nan_to_num(pose, nan=0.0)
     pose[3, :, :] = np.array([0.0, 0.0, 0.0, 1.0])[:, np.newaxis]
+    pose[:3, 3, :] *= _translation_scale_to_mm(c3d_obj)
     return pose
 
 
@@ -79,27 +95,100 @@ def _ensure_degrees(values: np.ndarray) -> np.ndarray:
     return values
 
 
+def _invert_rigid_pose(pose: np.ndarray) -> np.ndarray:
+    # Manual rigid-transform inverse (R^T, -R^T @ t), computed directly with numpy.
+    # pyomeca's Rototrans.from_transposed_rototrans does NOT correctly invert a
+    # Rototrans built from a raw numpy array -- verified against a known 90-degree
+    # rotation: composing its "inverse" with the original does not yield the
+    # identity, and the rotation submatrix it returns is left completely
+    # unchanged (not transposed at all). This bypasses that broken path.
+    rotation = pose[:3, :3, :]
+    translation = pose[:3, 3, :]
+    inv_pose = np.zeros_like(pose)
+    inv_rotation = np.transpose(rotation, (1, 0, 2))
+    inv_pose[:3, :3, :] = inv_rotation
+    inv_pose[:3, 3, :] = -np.einsum("ijt, jt -> it", inv_rotation, translation)
+    inv_pose[3, 3, :] = 1.0
+    return inv_pose
+
+
 def absolute_segment_angles(segment_pose: np.ndarray, sequence: str = "xyz") -> np.ndarray:
     # Convert the absolute segment pose into Euler angles for reporting.
-    segment_rt = Rototrans(segment_pose)
-    segment_rt_t = Rototrans.from_transposed_rototrans(segment_rt)
+    segment_rt_t = Rototrans(_invert_rigid_pose(segment_pose))
     angles = np.asarray(Angles.from_rototrans(segment_rt_t, sequence))
-    return _ensure_degrees(angles)
+    angles = _ensure_degrees(angles)
+    # Euler decomposition wraps at +/-180 degrees per axis (an atan2 branch cut).
+    # When the true absolute orientation sits near that boundary, a sub-degree
+    # frame-to-frame change can flip the extracted angle by ~360 degrees even
+    # though nothing moved. Unwrapping restores continuity within the trial --
+    # it does not change the reference frame or re-zero the angle, it only
+    # removes this discontinuity artifact.
+    #
+    # Frames with no real tracking data get a degenerate (all-zero) rotation
+    # submatrix from get_segment_pose's nan_to_num. These aren't real motion and
+    # must be excluded from the unwrap chain, or the untracked frames can drift
+    # by a spurious +/-360 just to stay "continuous" with real motion elsewhere
+    # in the trial that crossed the wrap boundary.
+    return _unwrap_degrees(angles, _valid_pose_mask(segment_pose), axis=-1)
+
+
+def _unwrap_degrees(angles: np.ndarray, valid: np.ndarray, axis: int = -1) -> np.ndarray:
+    # Unwrap only the valid (actually-tracked) frames, in their original order,
+    # and leave invalid/gap frames exactly as computed -- see absolute_segment_angles.
+    angles = np.moveaxis(np.array(angles, dtype=float, copy=True), axis, -1)
+    if valid.any():
+        for row in np.ndindex(angles.shape[:-1]):
+            angles[row][valid] = np.unwrap(angles[row][valid], period=360.0)
+    return np.moveaxis(angles, -1, axis)
+
+
+def _valid_pose_mask(pose: np.ndarray) -> np.ndarray:
+    # Frames with no real tracking data get a degenerate (all-zero) rotation
+    # submatrix from get_segment_pose's nan_to_num -- see absolute_segment_angles.
+    return np.linalg.norm(pose[:3, :3, :], axis=(0, 1)) > 1e-9
+
+
+def relative_segment_pose(parent_pose: np.ndarray, child_pose: np.ndarray) -> np.ndarray:
+    # Full 4x4 pose of the child expressed in the parent's frame (parent^-1 @ child):
+    # rotation R_parent^T @ R_child, translation R_parent^T @ (t_child - t_parent).
+    # Used both for joint angles (relative_segment_angles) and, for the pelvis, to
+    # re-express translation relative to a reference heading -- see build_mot_dataframe.
+    parent_rt_t = _invert_rigid_pose(parent_pose)
+    return np.asarray(np.einsum("ijt, jkt -> ikt", parent_rt_t, child_pose))
 
 
 def relative_segment_angles(parent_pose: np.ndarray, child_pose: np.ndarray, sequence: str = "xyz") -> np.ndarray:
     # Compute the child pose relative to the parent pose, then extract joint angles.
-    parent_rt = Rototrans(parent_pose)
-    child_rt = Rototrans(child_pose)
-    parent_rt_t = Rototrans.from_transposed_rototrans(parent_rt)
-    rel_rt = np.einsum("ijt, jkt -> ikt", parent_rt_t, child_rt)
-    rel_rt = Rototrans(rel_rt)
-    angles = np.asarray(Angles.from_rototrans(rel_rt, sequence))
-    return _ensure_degrees(angles)
+    rel_rt = relative_segment_pose(parent_pose, child_pose)
+    angles = np.asarray(Angles.from_rototrans(Rototrans(rel_rt), sequence))
+    angles = _ensure_degrees(angles)
+    valid = _valid_pose_mask(parent_pose) & _valid_pose_mask(child_pose)
+    return _unwrap_degrees(angles, valid, axis=-1)
 
 
-def build_mot_dataframe(c3d_obj: Dict) -> pd.DataFrame:
+def get_segment_reference_pose(c3d_obj: Dict, segment_label: str, frame_indices: Iterable[int]) -> np.ndarray:
+    # A single representative pose (time axis length 1), taken from the middle of
+    # frame_indices. Used to normalize absolute segment orientation against a
+    # neutral reference instead of Theia's raw lab frame -- see build_mot_dataframe.
+    pose = get_segment_pose(c3d_obj, segment_label)
+    frames = np.asarray(list(frame_indices), dtype=int)
+    reference_idx = int(np.median(frames))
+    return pose[:, :, reference_idx:reference_idx + 1]
+
+
+def build_mot_dataframe(c3d_obj: Dict, pelvis_reference_pose: np.ndarray | None = None) -> pd.DataFrame:
     # Build the OpenSim motion table one signal block at a time.
+    #
+    # pelvis_reference_pose: an optional single-frame pose (see
+    # get_segment_reference_pose) that pelvis_tilt/list/rotation are computed
+    # relative to, instead of Theia's raw absolute rotation. A pelvis rotation
+    # that's genuinely ~180 degrees from Theia's identity frame (which way the
+    # subject faced during capture) has no valid Euler representation that
+    # stays within gait2392's declared +/-90 degree range for pelvis_tilt/list
+    # -- proven by testing every rotation sequence and the algebraic
+    # alternate-solution identity, both still show a ~180 degree component
+    # somewhere. Re-expressing relative to a reference pose changes what "zero"
+    # means so normal gait motion reads as a few degrees instead.
     frame_rate, total_frames = get_frame_rate_and_count(c3d_obj)
     frame_values = np.arange(total_frames)
     time = np.round(frame_values / frame_rate, 5)
@@ -116,8 +205,32 @@ def build_mot_dataframe(c3d_obj: Dict) -> pd.DataFrame:
     r_shank = get_segment_pose(c3d_obj, "r_shank_4X4")
     r_foot = get_segment_pose(c3d_obj, "r_foot_4X4")
 
-    # Absolute pelvis angles are used as the OpenSim pelvis columns.
-    pelvis_angles = absolute_segment_angles(pelvis)
+    # Pelvis angles are used as the OpenSim pelvis columns. Sequence must be
+    # 'zxy' (intrinsic Z -> X -> Y), matching gait2392's ground_pelvis
+    # CustomJoint SpatialTransform exactly: pelvis_tilt rotates about Z first,
+    # pelvis_list about X second, pelvis_rotation about Y (vertical) third. A
+    # generic 'xyz' decomposition is a different rotation order, not just a
+    # relabeling, and puts the wrong values in each named column.
+    # Pelvis translation: tx/tz come along for the same fix when a reference is
+    # given. Theia's raw translation is expressed along its own fixed lab axes,
+    # which -- exactly like the raw rotation -- aren't aligned to which way the
+    # subject actually faced. Re-expressing translation in the reference pose's
+    # frame (the same relative_segment_pose used for the angles above, just also
+    # reading its translation column instead of only its rotation) corrects
+    # tx/tz the same way. pelvis_ty (height) is deliberately left as the raw
+    # absolute value in both branches below: it isn't heading-dependent, and
+    # OpenSim needs it as a genuine absolute quantity, not a delta from the
+    # reference's standing height.
+    if pelvis_reference_pose is not None:
+        reference_broadcast = np.repeat(pelvis_reference_pose, pelvis.shape[2], axis=2)
+        pelvis_angles = relative_segment_angles(reference_broadcast, pelvis, sequence="zxy")
+        pelvis_rel_translation = relative_segment_pose(reference_broadcast, pelvis)[:3, 3, :]
+        pelvis_tx_source = pelvis_rel_translation[1, :]
+        pelvis_tz_source = pelvis_rel_translation[0, :]
+    else:
+        pelvis_angles = absolute_segment_angles(pelvis, sequence="zxy")
+        pelvis_tx_source = pelvis[1, 3, :]
+        pelvis_tz_source = pelvis[0, 3, :]
     # Lumbar motion is the torso relative to the pelvis.
     lumbar_angles = relative_segment_angles(torso, pelvis)
 
@@ -134,9 +247,9 @@ def build_mot_dataframe(c3d_obj: Dict) -> pd.DataFrame:
     # Match the notebook's output columns so the exported MOT stays familiar.
     data = {
         "time": time,
-        "pelvis_list": np.round(pelvis_angles[2, 0, :], 2),
-        "pelvis_rotation": np.round(pelvis_angles[0, 0, :], 2),
-        "pelvis_tilt": np.round(pelvis_angles[1, 0, :], 2),
+        "pelvis_tilt": np.round(pelvis_angles[0, 0, :], 2),
+        "pelvis_list": np.round(pelvis_angles[1, 0, :], 2),
+        "pelvis_rotation": np.round(pelvis_angles[2, 0, :], 2),
         "hip_flexion_r": np.round(hip_angles_r[0, 0, :], 2),
         "hip_adduction_r": np.round(hip_angles_r[1, 0, :], 2),
         "hip_rotation_r": np.round(hip_angles_r[2, 0, :], 2),
@@ -148,9 +261,9 @@ def build_mot_dataframe(c3d_obj: Dict) -> pd.DataFrame:
         "knee_angle_l": np.round(knee_angles_l[0, 0, :], 2),
         "ankle_angle_l": np.round(ankle_angles_l[0, 0, :], 2),
         # Pelvis translations: convert mm to m. Axis mapping Theia→OpenSim: Y→X, Z→Y, X→Z.
-        "pelvis_tx": np.round(pelvis[1, 3, :] / 1000.0, 2),
+        "pelvis_tx": np.round(pelvis_tx_source / 1000.0, 2),
         "pelvis_ty": np.round(pelvis[2, 3, :] / 1000.0, 2),
-        "pelvis_tz": np.round(pelvis[0, 3, :] / 1000.0, 2),
+        "pelvis_tz": np.round(pelvis_tz_source / 1000.0, 2),
         "lumbar_bending": np.round(lumbar_angles[0, 0, :], 2),
         "lumbar_rotation": np.round(lumbar_angles[2, 0, :], 2),
         "lumbar_extension": np.round(lumbar_angles[1, 0, :], 2),
@@ -263,6 +376,7 @@ def extract_virtual_marker_positions(
     frame_indices: Iterable[int],
     marker_segment_map: Dict[str, str] | None = None,
     axis_order: Tuple[int, int, int] = (1, 2, 0),
+    reference_pose: np.ndarray | None = None,
 ) -> Dict[str, np.ndarray]:
     """
     Extract virtual marker positions from Theia3D segment origins.
@@ -274,6 +388,16 @@ def extract_virtual_marker_positions(
     OpenSim/TRC X <- Theia row 1
     OpenSim/TRC Y <- Theia row 2
     OpenSim/TRC Z <- Theia row 0
+
+    reference_pose: an optional single-frame pose (see get_segment_reference_pose)
+    to express marker origins relative to, instead of Theia's raw global position --
+    the same relative_segment_pose machinery used for pelvis_tx/tz. Without this,
+    a coordinate_file built from build_mot_dataframe's reference-relative pelvis
+    angles (near zero) and this TRC's raw absolute marker positions (Theia's actual
+    lab-frame position/heading, which can be far from zero) describe two different
+    poses of the same subject, and OpenSim's MarkerPlacer IK has to compromise
+    between them -- producing a large, spurious marker error. Passing the same
+    reference_pose used for the coordinate_file keeps both consistent.
 
     Positions are kept in millimetres for the OpenSim .trc file.
     """
@@ -295,8 +419,12 @@ def extract_virtual_marker_positions(
     for marker_name, segment_label in marker_segment_map.items():
         pose = get_segment_pose(c3d_obj, segment_label)
 
-        # Segment origin in Theia3D pose matrix: first three entries of final column.
-        origin = pose[:3, 3, :]
+        if reference_pose is not None:
+            reference_broadcast = np.repeat(reference_pose, pose.shape[2], axis=2)
+            origin = relative_segment_pose(reference_broadcast, pose)[:3, 3, :]
+        else:
+            # Segment origin in Theia3D pose matrix: first three entries of final column.
+            origin = pose[:3, 3, :]
 
         # Apply notebook coordinate mapping and average selected static frames.
         mapped_origin = origin[list(axis_order), :][:, frames]
@@ -362,6 +490,7 @@ def write_static_trc_from_c3d(
     frame_indices: Iterable[int],
     repeat_frames: int = 6,
     marker_segment_map: Dict[str, str] | None = None,
+    reference_pose: np.ndarray | None = None,
 ) -> Path:
     """
     Build and write a static .trc file directly from a Theia3D C3D file.
@@ -371,6 +500,7 @@ def write_static_trc_from_c3d(
         c3d_obj=c3d_obj,
         frame_indices=frame_indices,
         marker_segment_map=marker_segment_map,
+        reference_pose=reference_pose,
     )
 
     return write_static_trc(
