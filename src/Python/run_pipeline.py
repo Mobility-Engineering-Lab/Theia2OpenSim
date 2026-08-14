@@ -7,8 +7,10 @@ import os
 import shutil
 from pathlib import Path
 
+from opensim_ik import parse_coordinate_ranges_deg, run_ik_tool, unwrap_ik_motion, write_ik_setup_xml
 from opensim_scaling import run_scale_tool, write_scale_setup_xml
 from workflow_utils import (
+    DEFAULT_TRC_MARKER_SEGMENT_MAP,
     REQUIRED_ROTATION_LABELS,
     build_mot_dataframe,
     find_missing_labels,
@@ -17,8 +19,10 @@ from workflow_utils import (
     get_segment_reference_pose,
     load_theia_c3d,
     parse_frame_indices,
+    read_mot,
     trim_dataframe,
     validate_mot_dataframe,
+    write_dynamic_trc_from_c3d,
     write_mot,
     write_static_trc_from_c3d,
 )
@@ -98,6 +102,31 @@ def parse_args() -> argparse.Namespace:
         #       OPENSIM_CMD environment variable instead.
         help="Path to opensim-cmd(.exe). Falls back to $OPENSIM_CMD, then PATH.",
     )
+    parser.add_argument(
+        "--ik",
+        action="store_true",
+        help="Also run OpenSim's InverseKinematicsTool against a full-trial marker .trc "
+             "(marker-only IK, independent of the analytic .mot). Additive: writes separate "
+             "*_markers.trc / *_ik.mot files alongside the usual output. Requires a scaled "
+             "model to have been produced this run (see --no-scale).",
+    )
+    parser.add_argument("--ik-marker-trc", type=Path, default=None,
+                        help="Output path for the full-trial marker .trc used to drive IK. "
+                             "Defaults to <output-mot stem>_markers.trc.")
+    parser.add_argument("--ik-output-mot", type=Path, default=None,
+                        help="Output path for the IK-derived .mot. Defaults to <output-mot stem>_ik.mot.")
+    parser.add_argument("--ik-accuracy", type=float, default=1e-5,
+                        help="IK solver accuracy passed to OpenSim's InverseKinematicsTool.")
+    parser.add_argument("--ik-marker-weight", type=float, default=10.0,
+                        help="IKMarkerTask weight. Should stay well above --ik-coordinate-weight "
+                             "so markers, not the analytic coordinate priors, dominate the solve.")
+    parser.add_argument("--ik-coordinate-weight", type=float, default=1.0,
+                        help="IKCoordinateTask weight for the analytic-motion priors added to keep "
+                             "IK near a physically sane pose. Set to 0 (or use --ik-no-coordinate-priors) "
+                             "for pure marker-only IK.")
+    parser.add_argument("--ik-no-coordinate-priors", action="store_true",
+                        help="Run marker-only IK with no analytic-motion coordinate priors at all "
+                             "(the original, more underdetermined behavior).")
     return parser.parse_args()
 
 
@@ -105,6 +134,10 @@ def main() -> int:
     args = parse_args()
     if args.no_static_c3d:
         args.static_c3d = None
+    if args.ik_marker_trc is None:
+        args.ik_marker_trc = args.output_mot.with_name(args.output_mot.stem + "_markers.trc")
+    if args.ik_output_mot is None:
+        args.ik_output_mot = args.output_mot.with_name(args.output_mot.stem + "_ik.mot")
 
     # -------------------------------------------------------------------
     # Step 1: Resolve static configuration first (mirrors the notebook,
@@ -174,6 +207,21 @@ def main() -> int:
     # values across the test trials). Computed before the static TRC below so
     # the TRC's marker positions and the coordinate .mot used for scaling can
     # share the same reference frame -- see write_static_trc_from_c3d.
+    #
+    # This reference pose is used ONLY for the static TRC + scaling's
+    # coordinate .mot below (Step 3/3b) -- both need to share one reference so
+    # MarkerPlacer's IK isn't asked to reconcile two different poses (see
+    # extract_virtual_marker_positions). It must NOT also be used for the
+    # dynamic motion output: static_c3d_obj is a genuinely static calibration
+    # pose (needed for accurate marker placement -- using a moving/dynamic
+    # frame range here visibly mis-places movable markers like RTOE/LTOE, as
+    # seen using --no-static-c3d --static-frames on a walking/jumping trial),
+    # but its heading can be ~180 degrees off a given dynamic trial's own
+    # heading (see project_theia2opensim_pipeline_state.md memory). The
+    # dynamic motion's own reference (dynamic_reference_pose, Step 3c below)
+    # is always self-derived from that trial's own middle frame instead, so
+    # good marker placement and correct dynamic-motion heading don't have to
+    # trade off against each other.
     # -------------------------------------------------------------------
     if args.static_c3d is not None or args.static_frames is not None:
         reference_frame_indices = parse_frame_indices(static_frames_spec)
@@ -184,8 +232,8 @@ def main() -> int:
     pelvis_reference_pose = get_segment_reference_pose(
         static_c3d_obj, "pelvis_4X4", reference_frame_indices
     )
-    print(f"- Pelvis reference source: {static_source_label}")
-    print(f"- Pelvis reference frame(s): {[int(idx) for idx in reference_frame_indices]}")
+    print(f"- Pelvis reference source (scaling): {static_source_label}")
+    print(f"- Pelvis reference frame(s) (scaling): {[int(idx) for idx in reference_frame_indices]}")
     print("")
 
     if want_static:
@@ -214,6 +262,7 @@ def main() -> int:
     # extract_virtual_marker_positions). A missing opensim-cmd is a warning,
     # not a hard failure, since the .mot export below doesn't depend on it.
     # -------------------------------------------------------------------
+    scaling_succeeded = False
     if want_static and not args.no_scale:
         opensim_cmd = args.opensim_cmd or os.environ.get("OPENSIM_CMD")
         resolved_opensim_cmd = str(opensim_cmd) if opensim_cmd is not None else shutil.which("opensim-cmd")
@@ -242,6 +291,7 @@ def main() -> int:
             )
 
             result = run_scale_tool(setup_xml_path, args.output_osim, opensim_cmd=resolved_opensim_cmd)
+            scaling_succeeded = result.success
 
             if result.success:
                 print(f"[PASS] Wrote scaled OpenSim model: {result.output_model_file}")
@@ -253,11 +303,123 @@ def main() -> int:
             print("")
 
     # -------------------------------------------------------------------
-    # Step 4: Build the dynamic motion table, optionally trim zero-only
-    # edges, then validate and export.
+    # Step 3c: Build the analytic dynamic motion table now (moved ahead of
+    # its original Step 4 spot) so it's available below as an IKCoordinateTask
+    # prior for --ik. Untrimmed here regardless of --trim-zeros -- it has to
+    # share the same time base as the full-trial marker .trc written for IK,
+    # which is also untrimmed; trimming (if requested) happens to a copy of
+    # this same df right before the final write in Step 4.
+    #
+    # Uses its own reference pose (dynamic_reference_pose), NOT the scaling
+    # pelvis_reference_pose above -- see the Step 3a comment for why: this
+    # trial's own middle frame always shares this trial's own heading, so it
+    # can't hit the ~180 degree pelvis mismatch that using a separate static
+    # trial's heading can.
     # -------------------------------------------------------------------
-    df = build_mot_dataframe(c3d_obj, pelvis_reference_pose=pelvis_reference_pose)
+    _, dynamic_total_frames = get_frame_rate_and_count(c3d_obj)
+    dynamic_reference_pose = get_segment_reference_pose(
+        c3d_obj, "pelvis_4X4", [dynamic_total_frames // 2]
+    )
+    print(f"- Pelvis reference source (dynamic output): {args.c3d} (this trial's own middle frame)")
+    print("")
 
+    df = build_mot_dataframe(c3d_obj, pelvis_reference_pose=dynamic_reference_pose)
+
+    # -------------------------------------------------------------------
+    # Step 3d: Optionally run OpenSim's InverseKinematicsTool against a
+    # full-trial marker .trc, as an independent cross-check of the analytic
+    # .mot from Step 3c/4 -- deriving joint angles from marker geometry + the
+    # scaled model's own joint constraints instead of our per-segment Euler
+    # decomposition. Marker-only IK turned out to be underdetermined with
+    # markerstheia.xml's one-point-per-segment set (see opensim_ik.py module
+    # docstring / project_marker_only_ik_attempt.md memory), so by default
+    # this also adds the analytic df above as low-weight IKCoordinateTask
+    # priors (--ik-marker-weight >> --ik-coordinate-weight) to keep the
+    # solver near a physically sane pose; --ik-no-coordinate-priors restores
+    # the original pure marker-only behavior. Requires the scaled model from
+    # Step 3b above.
+    # -------------------------------------------------------------------
+    if args.ik:
+        if not scaling_succeeded:
+            print("[SKIP] --ik requires a scaled model; scaling did not run above "
+                  "(check --static-c3d/--static-frames, --no-scale, and opensim-cmd resolution).")
+            print("")
+        else:
+            ik_opensim_cmd = args.opensim_cmd or os.environ.get("OPENSIM_CMD")
+            resolved_ik_opensim_cmd = str(ik_opensim_cmd) if ik_opensim_cmd is not None else shutil.which("opensim-cmd")
+
+            if not resolved_ik_opensim_cmd or not Path(resolved_ik_opensim_cmd).exists():
+                print("[SKIP] InverseKinematicsTool: opensim-cmd not found. Pass --opensim-cmd or set OPENSIM_CMD.")
+                print("")
+            else:
+                trc_path = write_dynamic_trc_from_c3d(
+                    c3d_obj=c3d_obj,
+                    output_path=args.ik_marker_trc,
+                    reference_pose=dynamic_reference_pose,
+                )
+                print(f"[PASS] Wrote full-trial marker TRC for IK: {trc_path}")
+
+                ik_time_range = (0.0, (dynamic_total_frames - 1) / frame_rate)
+                subject_name = args.ik_output_mot.stem
+                ik_setup_xml_path = args.ik_output_mot.with_name(subject_name + "_IK_Setup.xml")
+
+                coordinate_file = None
+                coordinate_names = None
+                if not args.ik_no_coordinate_priors:
+                    coordinate_file = ik_setup_xml_path.with_name(subject_name + "_coord_prior.mot")
+                    write_mot(df, coordinate_file)
+                    coordinate_names = [c for c in df.columns if c != "time"]
+                    print(f"- Wrote analytic-motion coordinate priors for IK: {coordinate_file}")
+
+                write_ik_setup_xml(
+                    output_xml_path=ik_setup_xml_path,
+                    model_file=args.output_osim,
+                    marker_file=trc_path,
+                    output_motion_file=args.ik_output_mot,
+                    time_range=ik_time_range,
+                    marker_names=list(DEFAULT_TRC_MARKER_SEGMENT_MAP),
+                    accuracy=args.ik_accuracy,
+                    subject_name=subject_name,
+                    marker_weight=args.ik_marker_weight,
+                    coordinate_file=coordinate_file,
+                    coordinate_names=coordinate_names,
+                    coordinate_weight=args.ik_coordinate_weight,
+                )
+
+                ik_result = run_ik_tool(
+                    ik_setup_xml_path,
+                    args.ik_output_mot,
+                    subject_name=subject_name,
+                    opensim_cmd=resolved_ik_opensim_cmd,
+                )
+
+                if ik_result.success:
+                    print(f"[PASS] Wrote IK-derived OpenSim MOT file: {ik_result.output_motion_file}")
+                    if ik_result.marker_error_rms_mean is not None:
+                        print(f"- Marker error across trial: mean RMS = {ik_result.marker_error_rms_mean:.4f} m, "
+                              f"worst-frame RMS = {ik_result.marker_error_rms_max:.4f} m")
+
+                    # gait2392's rotational coordinates are all unclamped, so IK can
+                    # report a physically-correct pose on the wrong +/-360 degree
+                    # branch (confirmed empirically -- see opensim_ik.unwrap_ik_motion).
+                    # Write a second, additive copy with that branch resolved.
+                    ik_df = read_mot(ik_result.output_motion_file)
+                    coordinate_ranges = parse_coordinate_ranges_deg(args.output_osim)
+                    unwrapped_df = unwrap_ik_motion(ik_df, coordinate_ranges)
+                    unwrapped_path = ik_result.output_motion_file.with_name(
+                        ik_result.output_motion_file.stem + "_unwrapped.mot"
+                    )
+                    write_mot(unwrapped_df, unwrapped_path)
+                    print(f"- Wrote +/-360 degree unwrapped IK motion: {unwrapped_path}")
+                else:
+                    print("[FAIL] OpenSim InverseKinematicsTool did not complete successfully:")
+                    print(ik_result.stdout)
+                print("")
+
+    # -------------------------------------------------------------------
+    # Step 4: Optionally trim zero-only edges off the analytic motion table
+    # from Step 3c above, then validate and export.
+    # -------------------------------------------------------------------
     if args.trim_zeros:
         df = trim_dataframe(df, frame_rate=frame_rate)
 

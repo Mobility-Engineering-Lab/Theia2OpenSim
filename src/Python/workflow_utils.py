@@ -371,6 +371,35 @@ def parse_frame_indices(frame_spec: str) -> np.ndarray:
     return np.asarray([int(frame_spec)], dtype=int)
 
 
+def _map_marker_origins(
+    c3d_obj: Dict,
+    marker_segment_map: Dict[str, str],
+    axis_order: Tuple[int, int, int],
+    reference_pose: np.ndarray | None,
+) -> Dict[str, np.ndarray]:
+    """
+    Shared by extract_virtual_marker_positions (static/averaged) and
+    extract_virtual_marker_trajectory (full per-frame): map each marker's segment
+    origin into TRC axis order, optionally re-expressed relative to reference_pose.
+    Returns {marker_name: (3, num_frames)} arrays, in millimetres, unaveraged.
+    """
+    origins: Dict[str, np.ndarray] = {}
+    for marker_name, segment_label in marker_segment_map.items():
+        pose = get_segment_pose(c3d_obj, segment_label)
+
+        if reference_pose is not None:
+            reference_broadcast = np.repeat(reference_pose, pose.shape[2], axis=2)
+            origin = relative_segment_pose(reference_broadcast, pose)[:3, 3, :]
+        else:
+            # Segment origin in Theia3D pose matrix: first three entries of final column.
+            origin = pose[:3, 3, :]
+
+        # axis_order=(1, 2, 0) reproduces the notebook mapping:
+        # OpenSim/TRC X <- Theia row 1, Y <- Theia row 2, Z <- Theia row 0.
+        origins[marker_name] = origin[list(axis_order), :]
+    return origins
+
+
 def extract_virtual_marker_positions(
     c3d_obj: Dict,
     frame_indices: Iterable[int],
@@ -379,15 +408,13 @@ def extract_virtual_marker_positions(
     reference_pose: np.ndarray | None = None,
 ) -> Dict[str, np.ndarray]:
     """
-    Extract virtual marker positions from Theia3D segment origins.
+    Extract virtual marker positions from Theia3D segment origins, averaged over a
+    handful of selected static frames -- for the static .trc used by OpenSim's
+    Scale Tool. See extract_virtual_marker_trajectory for the full-trial version
+    used to drive InverseKinematicsTool.
 
     Theia3D stores each segment as a 4 x 4 pose matrix. The translational
     component is the first three entries of the final column, i.e., pose[:3, 3, :].
-
-    axis_order=(1, 2, 0) reproduces the notebook mapping:
-    OpenSim/TRC X <- Theia row 1
-    OpenSim/TRC Y <- Theia row 2
-    OpenSim/TRC Z <- Theia row 0
 
     reference_pose: an optional single-frame pose (see get_segment_reference_pose)
     to express marker origins relative to, instead of Theia's raw global position --
@@ -414,23 +441,75 @@ def extract_virtual_marker_positions(
             f"Selected static frame(s) out of range. Valid range is 0 to {total_frames - 1}."
         )
 
-    marker_positions: Dict[str, np.ndarray] = {}
+    origins = _map_marker_origins(c3d_obj, marker_segment_map, axis_order, reference_pose)
+    return {name: np.mean(origin[:, frames], axis=1) for name, origin in origins.items()}
 
-    for marker_name, segment_label in marker_segment_map.items():
-        pose = get_segment_pose(c3d_obj, segment_label)
 
-        if reference_pose is not None:
-            reference_broadcast = np.repeat(reference_pose, pose.shape[2], axis=2)
-            origin = relative_segment_pose(reference_broadcast, pose)[:3, 3, :]
-        else:
-            # Segment origin in Theia3D pose matrix: first three entries of final column.
-            origin = pose[:3, 3, :]
+def extract_virtual_marker_trajectory(
+    c3d_obj: Dict,
+    marker_segment_map: Dict[str, str] | None = None,
+    axis_order: Tuple[int, int, int] = (1, 2, 0),
+    reference_pose: np.ndarray | None = None,
+) -> Dict[str, np.ndarray]:
+    """
+    Extract full per-frame virtual marker trajectories from Theia3D segment origins,
+    for driving OpenSim's InverseKinematicsTool over an entire dynamic trial -- as
+    opposed to extract_virtual_marker_positions, which selects and averages a
+    handful of static frames for TRC-based model scaling. Same axis mapping and
+    optional reference_pose re-expression as extract_virtual_marker_positions.
 
-        # Apply notebook coordinate mapping and average selected static frames.
-        mapped_origin = origin[list(axis_order), :][:, frames]
-        marker_positions[marker_name] = np.mean(mapped_origin, axis=1)
+    Returns {marker_name: (num_frames, 3)} arrays, in millimetres.
+    """
+    if marker_segment_map is None:
+        marker_segment_map = DEFAULT_TRC_MARKER_SEGMENT_MAP
 
-    return marker_positions
+    origins = _map_marker_origins(c3d_obj, marker_segment_map, axis_order, reference_pose)
+    return {name: origin.T for name, origin in origins.items()}
+
+
+def _write_trc(
+    marker_names: List[str],
+    positions: np.ndarray,
+    times: np.ndarray,
+    output_path: Path,
+    data_rate: float,
+    units: str,
+) -> Path:
+    # Shared OpenSim .trc writer for write_static_trc (a repeated single pose) and
+    # write_dynamic_trc (real per-frame trajectories). positions: (num_frames,
+    # num_markers, 3).
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    num_frames, num_markers, _ = positions.shape
+
+    with output_path.open("w", encoding="utf-8", newline="") as file:
+        file.write(f"PathFileType\t4\t(X/Y/Z)\t{output_path.name}\n")
+        file.write(
+            "DataRate\tCameraRate\tNumFrames\tNumMarkers\tUnits\t"
+            "OrigDataRate\tOrigDataStartFrame\tOrigNumFrames\n"
+        )
+        file.write(
+            f"{data_rate:.6f}\t{data_rate:.6f}\t{num_frames}\t{num_markers}\t"
+            f"{units}\t{data_rate:.6f}\t1\t{num_frames}\n"
+        )
+
+        marker_header = ["Frame#", "Time"]
+        for marker_name in marker_names:
+            marker_header.extend([marker_name, "", ""])
+        file.write("\t".join(marker_header) + "\n")
+
+        xyz_header = ["", ""]
+        for idx in range(1, num_markers + 1):
+            xyz_header.extend([f"X{idx}", f"Y{idx}", f"Z{idx}"])
+        file.write("\t".join(xyz_header) + "\n")
+
+        for frame_idx, time_value in enumerate(times, start=1):
+            row = [str(frame_idx), f"{time_value:.6f}"]
+            for marker_idx in range(num_markers):
+                x, y, z = positions[frame_idx - 1, marker_idx, :]
+                row.extend([f"{x:.6f}", f"{y:.6f}", f"{z:.6f}"])
+            file.write("\t".join(row) + "\n")
+
+    return output_path
 
 
 def write_static_trc(
@@ -446,42 +525,53 @@ def write_static_trc(
     The same averaged static marker positions are repeated across several frames
     to mimic a static calibration trial for the OpenSim Scale Tool.
     """
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
     marker_names = list(marker_positions.keys())
-    num_markers = len(marker_names)
+    single_pose = np.array([marker_positions[name] for name in marker_names])  # (M, 3)
+    positions = np.repeat(single_pose[np.newaxis, :, :], repeat_frames, axis=0)  # (repeat_frames, M, 3)
     times = np.arange(repeat_frames, dtype=float) / float(data_rate)
+    return _write_trc(marker_names, positions, times, Path(output_path), data_rate, units)
 
-    with output_path.open("w", encoding="utf-8", newline="") as file:
-        file.write(f"PathFileType\t4\t(X/Y/Z)\t{output_path.name}\n")
-        file.write(
-            "DataRate\tCameraRate\tNumFrames\tNumMarkers\tUnits\t"
-            "OrigDataRate\tOrigDataStartFrame\tOrigNumFrames\n"
-        )
-        file.write(
-            f"{data_rate:.6f}\t{data_rate:.6f}\t{repeat_frames}\t{num_markers}\t"
-            f"{units}\t{data_rate:.6f}\t1\t{repeat_frames}\n"
-        )
 
-        marker_header = ["Frame#", "Time"]
-        for marker_name in marker_names:
-            marker_header.extend([marker_name, "", ""])
-        file.write("\t".join(marker_header) + "\n")
+def write_dynamic_trc(
+    marker_trajectories: Dict[str, np.ndarray],
+    output_path: str | Path,
+    frame_rate: float,
+    units: str = "mm",
+) -> Path:
+    """
+    Write a full time-varying OpenSim .trc file from per-frame virtual marker
+    trajectories (see extract_virtual_marker_trajectory), for driving OpenSim's
+    InverseKinematicsTool over an entire dynamic trial.
+    """
+    marker_names = list(marker_trajectories.keys())
+    num_frames = next(iter(marker_trajectories.values())).shape[0]
+    positions = np.stack([marker_trajectories[name] for name in marker_names], axis=1)  # (N, M, 3)
+    times = np.arange(num_frames, dtype=float) / float(frame_rate)
+    return _write_trc(marker_names, positions, times, Path(output_path), frame_rate, units)
 
-        xyz_header = ["", ""]
-        for idx in range(1, num_markers + 1):
-            xyz_header.extend([f"X{idx}", f"Y{idx}", f"Z{idx}"])
-        file.write("\t".join(xyz_header) + "\n")
 
-        for frame_idx, time_value in enumerate(times, start=1):
-            row = [str(frame_idx), f"{time_value:.6f}"]
-            for marker_name in marker_names:
-                x, y, z = marker_positions[marker_name]
-                row.extend([f"{x:.6f}", f"{y:.6f}", f"{z:.6f}"])
-            file.write("\t".join(row) + "\n")
-
-    return output_path
+def write_dynamic_trc_from_c3d(
+    c3d_obj: Dict,
+    output_path: str | Path,
+    marker_segment_map: Dict[str, str] | None = None,
+    reference_pose: np.ndarray | None = None,
+) -> Path:
+    """
+    Build and write a full time-varying .trc file directly from a Theia3D C3D file,
+    for driving OpenSim's InverseKinematicsTool over the whole dynamic trial.
+    """
+    frame_rate, _ = get_frame_rate_and_count(c3d_obj)
+    marker_trajectories = extract_virtual_marker_trajectory(
+        c3d_obj=c3d_obj,
+        marker_segment_map=marker_segment_map,
+        reference_pose=reference_pose,
+    )
+    return write_dynamic_trc(
+        marker_trajectories=marker_trajectories,
+        output_path=output_path,
+        frame_rate=frame_rate,
+        units="mm",
+    )
 
 
 def write_static_trc_from_c3d(
@@ -540,3 +630,15 @@ def write_mot(df: pd.DataFrame, output_path: str | Path) -> Path:
             file.write("\t".join(map(lambda x: f"{float(x):.6f}", row)) + "\n")
 
     return output_path
+
+
+def read_mot(path: str | Path) -> pd.DataFrame:
+    # Read a .mot file (write_mot's format, or any compatible OpenSim Storage-style
+    # motion file OpenSim itself writes): a short header ending in "endheader",
+    # then a tab-separated column-name row, then one data row per frame.
+    path = Path(path)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    header_idx = next(i for i, line in enumerate(lines) if line.strip().lower() == "endheader")
+    columns = lines[header_idx + 1].split("\t")
+    rows = [[float(x) for x in line.split("\t")] for line in lines[header_idx + 2 :] if line.strip()]
+    return pd.DataFrame(rows, columns=columns)
