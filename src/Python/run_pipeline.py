@@ -30,8 +30,8 @@ def parse_args() -> argparse.Namespace:
     #       OR leave them as-is and pass paths on the command line instead
     #       (e.g. --c3d "C:/MyData/trial01.c3d").
     # -------------------------------------------------------------------------
-    default_c3d         = Path(__file__).resolve().parents[2] / "sample_data" / "Walking.c3d"
-    default_out         = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim" / "OS_from_script.mot"
+    default_c3d         = Path(__file__).resolve().parents[2] / "sample_data" / "LWalking1_filt.c3d"
+    default_out         = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim" / "LWalking1.mot"
     default_static_c3d  = Path(__file__).resolve().parents[2] / "sample_data" / "Static.c3d"
     default_static_trc  = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim" / "Static.trc"
     default_scale_model = Path(__file__).resolve().parents[2] / "sample_data" / "gait2392_simbody.osim"

@@ -221,16 +221,85 @@ def build_mot_dataframe(c3d_obj: Dict, pelvis_reference_pose: np.ndarray | None 
     # absolute value in both branches below: it isn't heading-dependent, and
     # OpenSim needs it as a genuine absolute quantity, not a delta from the
     # reference's standing height.
+
+    # Theia -> OpenSim axis transformation
+    # Theia:   X = ML, Y = AP, Z = vertical
+    # OpenSim: X = AP, Y = vertical, Z = ML
+    #
+    # +pi/2 about Z, followed by +pi/2 about the new X
+
+    theta = np.pi / 2.0
+
+    Rz = np.array([
+        [np.cos(theta), -np.sin(theta), 0.0],
+        [np.sin(theta),  np.cos(theta), 0.0],
+        [0.0,            0.0,           1.0],
+    ])
+
+    Rx = np.array([
+        [1.0, 0.0,            0.0],
+        [0.0, np.cos(theta), -np.sin(theta)],
+        [0.0, np.sin(theta),  np.cos(theta)],
+    ])
+
+    C = Rz @ Rx
+
+    # Homogeneous version of the axis transformation
+    H = np.eye(4)
+    H[:3, :3] = C
+
+    # Express the pelvis pose using OpenSim axes
+    pelvis_os = np.einsum(
+        "ij,jkt,kl->ilt",
+        H.T,
+        pelvis,
+        H,
+    )
+
     if pelvis_reference_pose is not None:
-        reference_broadcast = np.repeat(pelvis_reference_pose, pelvis.shape[2], axis=2)
-        pelvis_angles = relative_segment_angles(reference_broadcast, pelvis, sequence="zxy")
-        pelvis_rel_translation = relative_segment_pose(reference_broadcast, pelvis)[:3, 3, :]
-        pelvis_tx_source = pelvis_rel_translation[1, :]
-        pelvis_tz_source = pelvis_rel_translation[0, :]
+
+        reference_broadcast = np.repeat(
+            pelvis_reference_pose,
+            pelvis.shape[2],
+            axis=2,
+        )
+
+        # Express the reference pelvis pose using OpenSim axes
+        reference_os = np.einsum(
+            "ij,jkt,kl->ilt",
+            H.T,
+            reference_broadcast,
+            H,
+        )
+
+        reference_os = np.repeat(np.eye(4)[:, :, None], reference_broadcast.shape[2], axis=2)
+
+        # Pelvis motion relative to the reference pose,
+        # now expressed using OpenSim axes
+        pelvis_angles = relative_segment_angles(
+            reference_os,
+            pelvis_os,
+            sequence="zxy",
+        )
+
+        pelvis_rel_translation = relative_segment_pose(
+            reference_os,
+            pelvis_os,
+        )[:3, 3, :]
+
+        pelvis_tx_source = pelvis_rel_translation[0, :]
+        pelvis_tz_source = pelvis_rel_translation[2, :]
+
     else:
-        pelvis_angles = absolute_segment_angles(pelvis, sequence="zxy")
-        pelvis_tx_source = pelvis[1, 3, :]
-        pelvis_tz_source = pelvis[0, 3, :]
+
+        pelvis_angles = absolute_segment_angles(
+            pelvis_os,
+            sequence="zxy",
+        )
+
+        pelvis_tx_source = pelvis_os[0, 3, :]
+        pelvis_tz_source = pelvis_os[2, 3, :]
+   
     # Lumbar motion is the torso relative to the pelvis.
     lumbar_angles = relative_segment_angles(torso, pelvis)
 
@@ -262,7 +331,8 @@ def build_mot_dataframe(c3d_obj: Dict, pelvis_reference_pose: np.ndarray | None 
         "ankle_angle_l": np.round(ankle_angles_l[0, 0, :], 2),
         # Pelvis translations: convert mm to m. Axis mapping Theia→OpenSim: Y→X, Z→Y, X→Z.
         "pelvis_tx": np.round(pelvis_tx_source / 1000.0, 2),
-        "pelvis_ty": np.round(pelvis[2, 3, :] / 1000.0, 2),
+        # "pelvis_ty": np.round(pelvis[2, 3, :] / 1000.0, 2),
+        "pelvis_ty": np.round(pelvis_os[1, 3, :] / 1000.0, 2),
         "pelvis_tz": np.round(pelvis_tz_source / 1000.0, 2),
         "lumbar_bending": np.round(lumbar_angles[0, 0, :], 2),
         "lumbar_rotation": np.round(lumbar_angles[2, 0, :], 2),
