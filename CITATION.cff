@@ -5,27 +5,28 @@ cff-version: 1.2.0
 title: Theia2OpenSim
 message: >-
   If you use this software, please cite it using the
-  metadata from this file.
+  metadata from this file. Xiong Zhao and Komal Azeem
+  contributed equally to this work.
 type: software
 authors:
+  - given-names: Xiong
+    family-names: Zhao
+    email: xiong.zhao@queensu.ca
+    affiliation: School of Kinesiology and Health Studies, Queen's University.
+    orcid: 'https://orcid.org/0000-0002-9367-6565'
   - given-names: Komal
     family-names: Azeem
     email: komal.azeem@queensu.ca
-    affiliation: Queen's University
-  - given-names: Xiong
-    family-names: Zhao
-    email: xiong.zhao@accmov.com
-    affiliation: AccMov Health Inc.
-    orcid: 'https://orcid.org/0000-0002-9367-6565'
+    affiliation: School of Kinesiology and Health Studies, Queen's University
   - given-names: Pouya
     family-names: Amiri
     email: p.amiri@queensu.ca
-    affiliation: Queen's University
+    affiliation: School of Kinesiology and Health Studies, Queen's University
 identifiers:
   - type: url
     value: >-
-      https://github.com/Xiong-biomech/Theia2OpenSim/releases/tag/v1.0.0-alpha
-repository-code: 'https://github.com/Xiong-biomech/Theia2OpenSim'
+      https://github.com/Mobility-Engineering-Lab/Theia2OpenSim/releases/tag/v1.0.0-alpha
+repository-code: 'https://github.com/Mobility-Engineering-Lab/Theia2OpenSim'
 abstract: >-
   A Python toolbox for converting Theia3D markerless
   motion-capture outputs into OpenSim-compatible .mot and

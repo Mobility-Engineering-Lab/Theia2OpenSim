@@ -6,8 +6,8 @@
 		<age>-1</age>
 		<notes>Unassigned</notes>
 		<GenericModelMaker>
-			<model_file>C:/Users/PouyaAmiri/VS code local repos/Theia2OpenSim/Theia2OpenSim/sample_data/gait2392_simbody.osim</model_file>
-			<marker_set_file>C:/Users/PouyaAmiri/VS code local repos/Theia2OpenSim/Theia2OpenSim/sample_data/markerstheia.xml</marker_set_file>
+			<model_file>D:/A_Work/Projects/Repos/Theia2OpenSim/sample_data/gait2392_simbody.osim</model_file>
+			<marker_set_file>D:/A_Work/Projects/Repos/Theia2OpenSim/sample_data/markerstheia.xml</marker_set_file>
 		</GenericModelMaker>
 		<ModelScaler>
 			<apply>true</apply>
@@ -166,10 +166,10 @@
 				<objects />
 				<groups />
 			</ScaleSet>
-			<marker_file>C:/Users/PouyaAmiri/VS code local repos/Theia2OpenSim/Theia2OpenSim/sample_data/OpenSim/Static.trc</marker_file>
+			<marker_file>D:/A_Work/Projects/Repos/Theia2OpenSim/notebook/Static.trc</marker_file>
 			<time_range> 0.000000 0.050000</time_range>
 			<preserve_mass_distribution>false</preserve_mass_distribution>
-			<output_model_file>C:/Users/PouyaAmiri/VS code local repos/Theia2OpenSim/Theia2OpenSim/sample_data/OpenSim/scaled_model.osim</output_model_file>
+			<output_model_file>D:/A_Work/Projects/Repos/Theia2OpenSim/notebook/scaled_model.osim</output_model_file>
 			<output_scale_file>Unassigned</output_scale_file>
 		</ModelScaler>
 		<MarkerPlacer>
@@ -305,11 +305,11 @@
 				</objects>
 				<groups />
 			</IKTaskSet>
-			<marker_file>C:/Users/PouyaAmiri/VS code local repos/Theia2OpenSim/Theia2OpenSim/sample_data/OpenSim/Static.trc</marker_file>
-			<coordinate_file>C:/Users/PouyaAmiri/VS code local repos/Theia2OpenSim/Theia2OpenSim/sample_data/OpenSim/scaled_model_static_coords.mot</coordinate_file>
+			<marker_file>D:/A_Work/Projects/Repos/Theia2OpenSim/notebook/Static.trc</marker_file>
+			<coordinate_file>D:/A_Work/Projects/Repos/Theia2OpenSim/notebook/scaled_model_static_coords.mot</coordinate_file>
 			<time_range> 0.000000 0.050000</time_range>
-			<output_motion_file>C:/Users/PouyaAmiri/VS code local repos/Theia2OpenSim/Theia2OpenSim/sample_data/OpenSim/scaled_model_Scaling_Setup_static_ik.mot</output_motion_file>
-			<output_model_file>C:/Users/PouyaAmiri/VS code local repos/Theia2OpenSim/Theia2OpenSim/sample_data/OpenSim/scaled_model.osim</output_model_file>
+			<output_motion_file>D:/A_Work/Projects/Repos/Theia2OpenSim/notebook/scaled_model_Scaling_Setup_static_ik.mot</output_motion_file>
+			<output_model_file>D:/A_Work/Projects/Repos/Theia2OpenSim/notebook/scaled_model.osim</output_model_file>
 			<output_marker_file>Unassigned</output_marker_file>
 			<max_marker_movement>-1</max_marker_movement>
 		</MarkerPlacer>
