@@ -1,185 +1,201 @@
 # Theia2OpenSim
 
-**Theia2OpenSim** is a Python toolbox for scaling OpenSim models and driving them with Theia3D markerless motion-capture outputs.
+Theia2OpenSim is a Python workflow for converting Theia3D C3D exports into OpenSim motion files, with optional static TRC generation and OpenSim model scaling.
 
-## Status
+## What It Does
 
-This repository started as a notebook-based workflow and now includes script-based Python tools under `src/Python` for reproducible validation, model scaling support, and motion export.
+- Loads Theia3D C3D files
+- Verifies required segment rotation labels
+- Computes pelvis, hip, knee, ankle, and lumbar kinematics
+- Exports OpenSim-compatible motion files (`.mot`)
+- Optionally generates a static calibration TRC (`.trc`) from a dedicated static trial or selected frames
+- Optionally runs OpenSim Scale Tool (`opensim-cmd run-tool`) to produce a scaled model (`.osim`)
 
-## Current capabilities
-
-- Read Theia3D-exported C3D files
-- Extract segment pose matrices and sanitize missing values
-- Compute pelvis, hip, knee, ankle, and lumbar kinematics
-- Build OpenSim-compatible `.mot` tables with full pelvis translation (`pelvis_tx`, `pelvis_ty`, `pelvis_tz`)
-- Generate static OpenSim-compatible `.trc` files for model scaling
-- Run OpenSim's Scale Tool automatically (via `opensim-cmd`) to produce a scaled `.osim` model
-- Validate the workflow against required Theia rotation labels
-
-## Repository structure (current)
+## Repository Layout
 
 ```text
 Theia2OpenSim/
-├── README.md
+├── CITATION.cff
 ├── LICENSE
+├── README.md
 ├── environment.yml
 ├── notebook/
 │   ├── Angle Calculator.ipynb
-│   ├── OS.mot
 │   ├── joint_centers.mat
+│   ├── OS.mot
 │   └── static1.trc
 ├── sample_data/
 │   ├── gait2392_simbody.osim
-│   ├── gait2392_simbody_scaled.osim
-│   ├── Walking.c3d
-│   ├── Static.c3d
 │   ├── markerstheia.xml
 │   ├── Scaling_Setup.xml
-│   └── OpenSim/
-│       ├── OPENSIM_OUTPUTS.md
-│       ├── OS_from_script.mot
-│       ├── Static.trc
+│   ├── c3d_trials/
+│   │   ├── LJogging.c3d
+│   │   ├── LSLDJ.c3d
+│   │   ├── LWalking1_filt.c3d
+│   │   ├── RJogging.c3d
+│   │   ├── RSLDJ.c3d
+│   │   ├── RWalking1_filt.c3d
+│   │   └── Static.c3d
+│   └── OpenSim_output/
+│       ├── LJogging_XZ.mot
+│       ├── LSLDJ_XZ.mot
+│       ├── LWalking1_XZ.mot
+│       ├── RJogging_XZ.mot
+│       ├── RSLDJ_XZ.mot
+│       ├── RWalking1_XZ.mot
 │       ├── scaled_model.osim
 │       ├── scaled_model_Scaling_Setup.xml
-│       └── scaled_model_static_coords.mot
+│       ├── scaled_model_Scaling_Setup_static_ik.mot
+│       ├── scaled_model_static_coords.mot
+│       └── Static.trc
 └── src/
-    ├── Python/
-    │   ├── PYTHON_TOOLBOX.md
-    │   ├── workflow_utils.py
-    │   ├── opensim_scaling.py
-    │   ├── validate_workflow.py
-    │   └── run_pipeline.py
-    └── Matlab/
-        └── placeholder_workflow.m
+    ├── Matlab/
+    │   └── placeholder_workflow.m
+    └── Python/
+        ├── opensim_scaling.py
+        ├── PYTHON_TOOLBOX.md
+        ├── run_pipeline.py
+        ├── validate_workflow.py
+        └── workflow_utils.py
 ```
 
-## Environment setup
-
-A conda environment file is included at `environment.yml`.
-
-Create the environment (the `-n` override names it `Theia2OpenSim`; omit it to use the lowercase `theia2opensim` name defined in the file):
+## Environment Setup
 
 ```bash
 conda env create -f environment.yml -n Theia2OpenSim
 conda activate Theia2OpenSim
 ```
 
-## Workflow validation
+## Script Entry Points
 
-Validate the script workflow on sample data:
+- `src/Python/run_pipeline.py`
+  - End-to-end pipeline: dynamic `.mot`, optional static `.trc`, optional scaling to `.osim`.
+- `src/Python/validate_workflow.py`
+  - Validates required labels and generated motion-table integrity.
+
+## Validate Workflow
+
+`validate_workflow.py` defaults to:
+
+- `sample_data/c3d_trials/LWalking1_filt.c3d`
+
+Run with default input:
 
 ```bash
 python src/Python/validate_workflow.py
 ```
 
-Expected behavior:
+Or pass a specific trial explicitly:
 
-- confirms required rotation labels are present
-- checks generated motion table integrity
-- prints PASS/FAIL summary
+```bash
+python src/Python/validate_workflow.py --c3d sample_data/c3d_trials/LWalking1_filt.c3d
+```
 
-## Run conversion pipeline
+Expected output:
 
-Running with no arguments does the most common thing end to end: it converts
-`sample_data/Walking.c3d` to a dynamic `.mot`, generates a static `.trc` from
-`sample_data/Static.c3d` (that's the default `--static-c3d`), and — if
-`opensim-cmd` can be found — runs OpenSim's Scale Tool to produce a scaled
-`.osim` model:
+- Input summary (file, frame rate, frame count)
+- Required-label check
+- PASS/FAIL validation status
+
+## Run The Pipeline
+
+Run with script defaults:
 
 ```bash
 python src/Python/run_pipeline.py
 ```
 
-This writes `sample_data/OpenSim/OS_from_script.mot`, `sample_data/OpenSim/Static.trc`,
-and `sample_data/OpenSim/scaled_model.osim` (plus the intermediate
-`scaled_model_Scaling_Setup.xml` / `scaled_model_static_coords.mot` files the
-Scale Tool needs).
+Current default paths in `run_pipeline.py`:
 
-`opensim-cmd` resolution order: `--opensim-cmd`, then the `OPENSIM_CMD`
-environment variable, then `PATH`. If none resolve, scaling is skipped with a
-`[SKIP]` message and the `.mot`/`.trc` export still completes.
+- `--c3d`: `sample_data/c3d_trials/RJogging.c3d`
+- `--output-mot`: `sample_data/OpenSim_output/RJogging_test.mot`
+- `--static-c3d`: `sample_data/c3d_trials/Static.c3d`
+- `--output-trc`: `sample_data/OpenSim_output/Static.trc`
+- `--scale-model`: `sample_data/gait2392_simbody.osim`
+- `--marker-set`: `sample_data/markerstheia.xml`
+- `--output-osim`: `sample_data/OpenSim_output/scaled_model.osim`
 
-### Common flags
+When static input is provided, scaling runs by default unless `--no-scale` is set.
+If `opensim-cmd` is not found, scaling is skipped and `.mot`/`.trc` export still completes.
 
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `--c3d` | `sample_data/Walking.c3d` | Dynamic trial C3D to convert. |
-| `--output-mot` | `sample_data/OpenSim/OS_from_script.mot` | Output dynamic `.mot` path. |
-| `--trim-zeros` | off | Trim leading/trailing all-zero frames per signal and rebase time. |
-| `--static-c3d` | `sample_data/Static.c3d` | Dedicated static C3D used for the TRC, the pelvis reference pose, and scaling. |
-| `--no-static-c3d` | off | Ignore `--static-c3d`'s default. Falls back to `--static-frames` against the dynamic trial, or produces `.mot` only if `--static-frames` is also omitted. |
-| `--static-frames` | `"300"` | Frame(s) to use for the static pose instead of/in addition to `--static-c3d`, e.g. `"300"`, `"290:310"`, `"290,300,310"`. |
-| `--output-trc` | `sample_data/OpenSim/Static.trc` | Output static `.trc` path. |
-| `--repeat-static-frames` | `6` | Number of repeated frames written to the static `.trc`. |
-| `--no-scale` | off | Skip running the OpenSim Scale Tool (the `.mot`/`.trc` export still runs). |
-| `--scale-model` | `sample_data/gait2392_simbody.osim` | Generic (unscaled) `.osim` model to scale. |
-| `--marker-set` | `sample_data/markerstheia.xml` | OpenSim `MarkerSet` XML matching the virtual marker names. |
-| `--output-osim` | `sample_data/OpenSim/scaled_model.osim` | Output scaled `.osim` model path. |
-| `--subject-mass` | `75.1646` | Subject mass (kg) written into the Scale Tool setup. |
-| `--opensim-cmd` | none | Path to `opensim-cmd(.exe)`. Falls back to `$OPENSIM_CMD`, then `PATH`. |
+## Common Examples
 
-Optional trimming of leading/trailing zeros:
-
-```bash
-python src/Python/run_pipeline.py --trim-zeros
-```
-
-Skip scaling and just export `.mot` + static `.trc`:
+Dynamic `.mot` only:
 
 ```bash
 python src/Python/run_pipeline.py \
-  --c3d sample_data/Walking.c3d \
-  --output-mot sample_data/OpenSim/OS_from_script.mot \
-  --output-trc sample_data/OpenSim/static_from_script.trc \
+  --c3d sample_data/c3d_trials/LWalking1_filt.c3d \
+  --output-mot sample_data/OpenSim_output/LWalking1_filt.mot \
+  --no-static-c3d
+```
+
+Dynamic `.mot` + static `.trc` + scaled `.osim` from dedicated static trial:
+
+```bash
+python src/Python/run_pipeline.py \
+  --c3d sample_data/c3d_trials/LWalking1_filt.c3d \
+  --output-mot sample_data/OpenSim_output/LWalking1_filt.mot \
+  --static-c3d sample_data/c3d_trials/Static.c3d \
+  --output-trc sample_data/OpenSim_output/Static.trc \
+  --output-osim sample_data/OpenSim_output/scaled_model.osim
+```
+
+Skip scaling, keep `.mot` + `.trc`:
+
+```bash
+python src/Python/run_pipeline.py \
+  --c3d sample_data/c3d_trials/LWalking1_filt.c3d \
+  --static-c3d sample_data/c3d_trials/Static.c3d \
+  --output-trc sample_data/OpenSim_output/Static.trc \
   --no-scale
 ```
 
-Generate `.mot` and static `.trc` using selected frames from the dynamic trial
-instead of a dedicated static C3D (scaling still runs too, using those same
-frames as the static pose, unless `--no-scale` is also passed):
+Use dynamic-trial frames as static source:
 
 ```bash
 python src/Python/run_pipeline.py \
-  --c3d sample_data/Walking.c3d \
-  --output-mot sample_data/OpenSim/OS_from_script.mot \
+  --c3d sample_data/c3d_trials/LWalking1_filt.c3d \
+  --output-mot sample_data/OpenSim_output/LWalking1_filt.mot \
   --no-static-c3d \
   --static-frames 290:310 \
-  --output-trc sample_data/OpenSim/static_from_script.trc
+  --output-trc sample_data/OpenSim_output/Static.trc
 ```
 
-## OpenSim files
+Use an explicit OpenSim CLI path:
 
-- Marker definition file: `sample_data/markerstheia.xml`
-- Script output folder: `sample_data/OpenSim/`
-- Static `.trc` virtual markers are mapped from Theia segment origins for OpenSim scaling
-- Scaling is driven by a templated Scale Tool setup XML (`src/Python/opensim_scaling.py`) run via `opensim-cmd run-tool` as a subprocess
-- OpenSim sample model/setup assets are provided under `sample_data/`
+```bash
+python src/Python/run_pipeline.py --opensim-cmd "C:/OpenSim 4.5/bin/opensim-cmd.exe"
+```
 
-## MATLAB path
+## `run_pipeline.py` Flags
 
-`src/Matlab/placeholder_workflow.m` is a placeholder for future MATLAB parity with the Python workflow.
+| Flag                       | Default                                          | Purpose                                                                             |
+| -------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `--c3d`                  | `sample_data/c3d_trials/RJogging.c3d`          | Dynamic trial C3D to convert.                                                       |
+| `--output-mot`           | `sample_data/OpenSim_output/RJogging_test.mot` | Output dynamic`.mot` path.                                                        |
+| `--trim-zeros`           | off                                              | Trim leading/trailing all-zero regions per signal and rebase time.                  |
+| `--static-c3d`           | `sample_data/c3d_trials/Static.c3d`            | Dedicated static C3D used for TRC generation and scaling.                           |
+| `--no-static-c3d`        | off                                              | Ignore`--static-c3d` and use dynamic-trial static frames or `.mot`-only flow.   |
+| `--static-frames`        | `None` (runtime fallback uses `"300"`)       | Frame spec for static pose (`"300"`, `"290:310"`, `"290,300,310"`).           |
+| `--output-trc`           | `sample_data/OpenSim_output/Static.trc`        | Output static`.trc` path.                                                         |
+| `--repeat-static-frames` | `6`                                            | Number of repeated frames written to static`.trc`.                                |
+| `--no-scale`             | off                                              | Skip OpenSim Scale Tool run.                                                        |
+| `--scale-model`          | `sample_data/gait2392_simbody.osim`            | Generic model used as Scale Tool input.                                             |
+| `--marker-set`           | `sample_data/markerstheia.xml`                 | MarkerSet XML matching virtual marker names.                                        |
+| `--output-osim`          | `sample_data/OpenSim_output/scaled_model.osim` | Output scaled`.osim` path.                                                        |
+| `--subject-mass`         | `75.1646`                                      | Subject mass (kg) written into Scale Tool setup XML.                                |
+| `--opensim-cmd`          | `None`                                         | Path to`opensim-cmd(.exe)`; fallback order: flag, `OPENSIM_CMD`, then `PATH`. |
 
-## Collaboration
+## Dependency Notes
 
-Contributions are welcome.
+The Python scripts in `src/Python` directly depend on:
 
-High-priority collaboration areas:
+- `numpy`
+- `pandas`
+- `ezc3d`
+- `pyomeca`
 
-- robust `.trc` export from script workflow
-- batch processing for multiple trials
-- improved coordinate-system documentation and validation
-- OpenSim verification examples and setup templates
-- cross-validation against marker-based pipelines
-
-If you want to contribute, open an issue with:
-
-- your use case
-- sample data constraints
-- expected OpenSim outputs
-
-## Citation
-
-If you use this toolbox in research, please cite the associated manuscript/communication when available.
+`opensim-cmd` is an external OpenSim CLI executable and is not installed by `environment.yml`.
 
 ## License
 
@@ -187,58 +203,4 @@ MIT License.
 
 ## Disclaimer
 
-This toolbox is for research use. Users must verify coordinate transforms and exported OpenSim files before scientific or clinical interpretation.
-
-## Example commands
-
-Dynamic `.mot` only (skip the static `.trc` and scaling):
-
-```bash
-python src/Python/run_pipeline.py \
-  --c3d sample_data/Walking.c3d \
-  --output-mot sample_data/OpenSim/OS_from_script.mot \
-  --no-static-c3d
-```
-
-Dynamic `.mot` plus static `.trc` plus scaled `.osim`, from the dedicated
-static trial (this is also what running with no flags does, since
-`--static-c3d` already defaults to `sample_data/Static.c3d`):
-
-```bash
-python src/Python/run_pipeline.py \
-  --c3d sample_data/Walking.c3d \
-  --output-mot sample_data/OpenSim/OS_from_script.mot \
-  --static-c3d sample_data/Static.c3d \
-  --output-trc sample_data/OpenSim/static_from_script.trc \
-  --output-osim sample_data/OpenSim/scaled_model.osim
-```
-
-Same, but skip the Scale Tool run (`.mot` + `.trc` only):
-
-```bash
-python src/Python/run_pipeline.py \
-  --c3d sample_data/Walking.c3d \
-  --output-mot sample_data/OpenSim/OS_from_script.mot \
-  --static-c3d sample_data/Static.c3d \
-  --output-trc sample_data/OpenSim/static_from_script.trc \
-  --no-scale
-```
-
-Dynamic `.mot` plus static `.trc` from frames within the dynamic trial
-instead of a dedicated static C3D (scaling still runs too unless `--no-scale`
-is also passed):
-
-```bash
-python src/Python/run_pipeline.py \
-  --c3d sample_data/Walking.c3d \
-  --output-mot sample_data/OpenSim/OS_from_script.mot \
-  --no-static-c3d \
-  --static-frames 290:310 \
-  --output-trc sample_data/OpenSim/static_from_script.trc
-```
-
-Point at a specific `opensim-cmd` instead of relying on `PATH`:
-
-```bash
-python src/Python/run_pipeline.py --opensim-cmd "/path/to/OpenSim/bin/opensim-cmd"
-```
+This toolbox is for research use. Validate coordinate transforms and generated OpenSim files before scientific or clinical interpretation.

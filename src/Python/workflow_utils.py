@@ -151,8 +151,6 @@ def _valid_pose_mask(pose: np.ndarray) -> np.ndarray:
 def relative_segment_pose(parent_pose: np.ndarray, child_pose: np.ndarray) -> np.ndarray:
     # Full 4x4 pose of the child expressed in the parent's frame (parent^-1 @ child):
     # rotation R_parent^T @ R_child, translation R_parent^T @ (t_child - t_parent).
-    # Used both for joint angles (relative_segment_angles) and, for the pelvis, to
-    # re-express translation relative to a reference heading -- see build_mot_dataframe.
     parent_rt_t = _invert_rigid_pose(parent_pose)
     return np.asarray(np.einsum("ijt, jkt -> ikt", parent_rt_t, child_pose))
 
@@ -166,29 +164,9 @@ def relative_segment_angles(parent_pose: np.ndarray, child_pose: np.ndarray, seq
     return _unwrap_degrees(angles, valid, axis=-1)
 
 
-def get_segment_reference_pose(c3d_obj: Dict, segment_label: str, frame_indices: Iterable[int]) -> np.ndarray:
-    # A single representative pose (time axis length 1), taken from the middle of
-    # frame_indices. Used to normalize absolute segment orientation against a
-    # neutral reference instead of Theia's raw lab frame -- see build_mot_dataframe.
-    pose = get_segment_pose(c3d_obj, segment_label)
-    frames = np.asarray(list(frame_indices), dtype=int)
-    reference_idx = int(np.median(frames))
-    return pose[:, :, reference_idx:reference_idx + 1]
-
-
-def build_mot_dataframe(c3d_obj: Dict, pelvis_reference_pose: np.ndarray | None = None) -> pd.DataFrame:
+def build_mot_dataframe(c3d_obj: Dict) -> pd.DataFrame:
     # Build the OpenSim motion table one signal block at a time.
-    #
-    # pelvis_reference_pose: an optional single-frame pose (see
-    # get_segment_reference_pose) that pelvis_tilt/list/rotation are computed
-    # relative to, instead of Theia's raw absolute rotation. A pelvis rotation
-    # that's genuinely ~180 degrees from Theia's identity frame (which way the
-    # subject faced during capture) has no valid Euler representation that
-    # stays within gait2392's declared +/-90 degree range for pelvis_tilt/list
-    # -- proven by testing every rotation sequence and the algebraic
-    # alternate-solution identity, both still show a ~180 degree component
-    # somewhere. Re-expressing relative to a reference pose changes what "zero"
-    # means so normal gait motion reads as a few degrees instead.
+
     frame_rate, total_frames = get_frame_rate_and_count(c3d_obj)
     frame_values = np.arange(total_frames)
     time = np.round(frame_values / frame_rate, 5)
@@ -206,33 +184,59 @@ def build_mot_dataframe(c3d_obj: Dict, pelvis_reference_pose: np.ndarray | None 
     r_foot = get_segment_pose(c3d_obj, "r_foot_4X4")
 
     # Pelvis angles are used as the OpenSim pelvis columns. Sequence must be
-    # 'zxy' (intrinsic Z -> X -> Y), matching gait2392's ground_pelvis
-    # CustomJoint SpatialTransform exactly: pelvis_tilt rotates about Z first,
-    # pelvis_list about X second, pelvis_rotation about Y (vertical) third. A
-    # generic 'xyz' decomposition is a different rotation order, not just a
-    # relabeling, and puts the wrong values in each named column.
-    # Pelvis translation: tx/tz come along for the same fix when a reference is
-    # given. Theia's raw translation is expressed along its own fixed lab axes,
-    # which -- exactly like the raw rotation -- aren't aligned to which way the
-    # subject actually faced. Re-expressing translation in the reference pose's
-    # frame (the same relative_segment_pose used for the angles above, just also
-    # reading its translation column instead of only its rotation) corrects
-    # tx/tz the same way. pelvis_ty (height) is deliberately left as the raw
-    # absolute value in both branches below: it isn't heading-dependent, and
-    # OpenSim needs it as a genuine absolute quantity, not a delta from the
-    # reference's standing height.
-    if pelvis_reference_pose is not None:
-        reference_broadcast = np.repeat(pelvis_reference_pose, pelvis.shape[2], axis=2)
-        pelvis_angles = relative_segment_angles(reference_broadcast, pelvis, sequence="zxy")
-        pelvis_rel_translation = relative_segment_pose(reference_broadcast, pelvis)[:3, 3, :]
-        pelvis_tx_source = pelvis_rel_translation[1, :]
-        pelvis_tz_source = pelvis_rel_translation[0, :]
-    else:
-        pelvis_angles = absolute_segment_angles(pelvis, sequence="zxy")
-        pelvis_tx_source = pelvis[1, 3, :]
-        pelvis_tz_source = pelvis[0, 3, :]
+    # 'zxy' (intrinsic Z -> X -> Y), matching gait2392's ground_pelvis.
+
+    # Theia -> OpenSim axis transformation
+    # Theia:   X = ML, Y = AP, Z = vertical
+    # OpenSim: X = AP, Y = vertical, Z = ML
+    #
+    # +pi/2 about Z, followed by +pi/2 about the new X
+
+    theta = np.pi / 2.0
+
+    Rz = np.array([
+        [np.cos(theta), -np.sin(theta), 0.0],
+        [np.sin(theta),  np.cos(theta), 0.0],
+        [0.0,            0.0,           1.0],
+    ])
+
+    Rx = np.array([
+        [1.0, 0.0,            0.0],
+        [0.0, np.cos(theta), -np.sin(theta)],
+        [0.0, np.sin(theta),  np.cos(theta)],
+    ])
+
+    C = Rz @ Rx
+
+    # Homogeneous version of the axis transformation
+    H = np.eye(4)
+    H[:3, :3] = C
+
+    # Express the pelvis pose using OpenSim axes
+    pelvis_os = np.einsum(
+        "ij,jkt,kl->ilt",
+        H.T,
+        pelvis,
+        H,
+    )
+
+    identity_ref = np.repeat(
+    np.eye(4)[:, :, None],
+    pelvis_os.shape[2],
+    axis=2,
+)
+
+    pelvis_angles = relative_segment_angles(
+        identity_ref,
+        pelvis_os,
+        sequence="zxy",
+)
+
+    pelvis_tx_source = pelvis_os[0, 3, :]
+    pelvis_tz_source = pelvis_os[2, 3, :]
+   
     # Lumbar motion is the torso relative to the pelvis.
-    lumbar_angles = relative_segment_angles(torso, pelvis)
+    lumbar_angles = relative_segment_angles(pelvis, torso, sequence="zxy")
 
     # Joint angles are calculated from child segment motion relative to its parent segment.
     knee_angles_l = relative_segment_angles(l_thigh, l_shank)
@@ -247,26 +251,26 @@ def build_mot_dataframe(c3d_obj: Dict, pelvis_reference_pose: np.ndarray | None 
     # Match the notebook's output columns so the exported MOT stays familiar.
     data = {
         "time": time,
-        "pelvis_tilt": np.round(pelvis_angles[0, 0, :], 2),
-        "pelvis_list": np.round(pelvis_angles[1, 0, :], 2),
-        "pelvis_rotation": np.round(pelvis_angles[2, 0, :], 2),
-        "hip_flexion_r": np.round(hip_angles_r[0, 0, :], 2),
-        "hip_adduction_r": np.round(hip_angles_r[1, 0, :], 2),
-        "hip_rotation_r": np.round(hip_angles_r[2, 0, :], 2),
-        "knee_angle_r": np.round(knee_angles_r[0, 0, :], 2),
-        "ankle_angle_r": np.round(ankle_angles_r[0, 0, :], 2),
-        "hip_flexion_l": np.round(hip_angles_l[0, 0, :], 2),
-        "hip_adduction_l": np.round(hip_angles_l[1, 0, :], 2),
-        "hip_rotation_l": np.round(hip_angles_l[2, 0, :], 2),
-        "knee_angle_l": np.round(knee_angles_l[0, 0, :], 2),
-        "ankle_angle_l": np.round(ankle_angles_l[0, 0, :], 2),
+        "pelvis_tilt": pelvis_angles[0, 0, :],
+        "pelvis_list": pelvis_angles[1, 0, :],
+        "pelvis_rotation": pelvis_angles[2, 0, :],
+        "hip_flexion_r": hip_angles_r[0, 0, :],
+        "hip_adduction_r":  hip_angles_r[1, 0, :],
+        "hip_rotation_r":  hip_angles_r[2, 0, :],
+        "knee_angle_r": knee_angles_r[0, 0, :],
+        "ankle_angle_r": ankle_angles_r[0, 0, :],
+        "hip_flexion_l": hip_angles_l[0, 0, :],
+        "hip_adduction_l": -hip_angles_l[1, 0, :],
+        "hip_rotation_l":  -hip_angles_l[2, 0, :],
+        "knee_angle_l": knee_angles_l[0, 0, :],
+        "ankle_angle_l": ankle_angles_l[0, 0, :],
         # Pelvis translations: convert mm to m. Axis mapping Theia→OpenSim: Y→X, Z→Y, X→Z.
-        "pelvis_tx": np.round(pelvis_tx_source / 1000.0, 2),
-        "pelvis_ty": np.round(pelvis[2, 3, :] / 1000.0, 2),
-        "pelvis_tz": np.round(pelvis_tz_source / 1000.0, 2),
-        "lumbar_bending": np.round(lumbar_angles[0, 0, :], 2),
-        "lumbar_rotation": np.round(lumbar_angles[2, 0, :], 2),
-        "lumbar_extension": np.round(lumbar_angles[1, 0, :], 2),
+        "pelvis_tx": pelvis_tx_source / 1000.0,
+        "pelvis_ty": pelvis_os[1, 3, :] / 1000.0,
+        "pelvis_tz": pelvis_tz_source / 1000.0,
+        "lumbar_bending": lumbar_angles[0, 0, :],
+        "lumbar_rotation": lumbar_angles[2, 0, :],
+        "lumbar_extension": lumbar_angles[1, 0, :],
     }
 
     return pd.DataFrame(data)
@@ -376,29 +380,11 @@ def extract_virtual_marker_positions(
     frame_indices: Iterable[int],
     marker_segment_map: Dict[str, str] | None = None,
     axis_order: Tuple[int, int, int] = (1, 2, 0),
-    reference_pose: np.ndarray | None = None,
 ) -> Dict[str, np.ndarray]:
     """
     Extract virtual marker positions from Theia3D segment origins.
-
     Theia3D stores each segment as a 4 x 4 pose matrix. The translational
     component is the first three entries of the final column, i.e., pose[:3, 3, :].
-
-    axis_order=(1, 2, 0) reproduces the notebook mapping:
-    OpenSim/TRC X <- Theia row 1
-    OpenSim/TRC Y <- Theia row 2
-    OpenSim/TRC Z <- Theia row 0
-
-    reference_pose: an optional single-frame pose (see get_segment_reference_pose)
-    to express marker origins relative to, instead of Theia's raw global position --
-    the same relative_segment_pose machinery used for pelvis_tx/tz. Without this,
-    a coordinate_file built from build_mot_dataframe's reference-relative pelvis
-    angles (near zero) and this TRC's raw absolute marker positions (Theia's actual
-    lab-frame position/heading, which can be far from zero) describe two different
-    poses of the same subject, and OpenSim's MarkerPlacer IK has to compromise
-    between them -- producing a large, spurious marker error. Passing the same
-    reference_pose used for the coordinate_file keeps both consistent.
-
     Positions are kept in millimetres for the OpenSim .trc file.
     """
     if marker_segment_map is None:
@@ -419,12 +405,7 @@ def extract_virtual_marker_positions(
     for marker_name, segment_label in marker_segment_map.items():
         pose = get_segment_pose(c3d_obj, segment_label)
 
-        if reference_pose is not None:
-            reference_broadcast = np.repeat(reference_pose, pose.shape[2], axis=2)
-            origin = relative_segment_pose(reference_broadcast, pose)[:3, 3, :]
-        else:
-            # Segment origin in Theia3D pose matrix: first three entries of final column.
-            origin = pose[:3, 3, :]
+        origin = pose[:3, 3, :]
 
         # Apply notebook coordinate mapping and average selected static frames.
         mapped_origin = origin[list(axis_order), :][:, frames]
@@ -490,7 +471,6 @@ def write_static_trc_from_c3d(
     frame_indices: Iterable[int],
     repeat_frames: int = 6,
     marker_segment_map: Dict[str, str] | None = None,
-    reference_pose: np.ndarray | None = None,
 ) -> Path:
     """
     Build and write a static .trc file directly from a Theia3D C3D file.
@@ -500,7 +480,6 @@ def write_static_trc_from_c3d(
         c3d_obj=c3d_obj,
         frame_indices=frame_indices,
         marker_segment_map=marker_segment_map,
-        reference_pose=reference_pose,
     )
 
     return write_static_trc(

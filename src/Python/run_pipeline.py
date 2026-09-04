@@ -14,7 +14,6 @@ from workflow_utils import (
     find_missing_labels,
     get_frame_rate_and_count,
     get_rotation_labels,
-    get_segment_reference_pose,
     load_theia_c3d,
     parse_frame_indices,
     trim_dataframe,
@@ -30,13 +29,13 @@ def parse_args() -> argparse.Namespace:
     #       OR leave them as-is and pass paths on the command line instead
     #       (e.g. --c3d "C:/MyData/trial01.c3d").
     # -------------------------------------------------------------------------
-    default_c3d         = Path(__file__).resolve().parents[2] / "sample_data" / "Walking.c3d"
-    default_out         = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim" / "OS_from_script.mot"
-    default_static_c3d  = Path(__file__).resolve().parents[2] / "sample_data" / "Static.c3d"
-    default_static_trc  = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim" / "Static.trc"
+    default_c3d         = Path(__file__).resolve().parents[2] / "sample_data" / "c3d_trials"/"RJogging.c3d"
+    default_out         = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "RJogging_test.mot"
+    default_static_c3d  = Path(__file__).resolve().parents[2] / "sample_data" / "c3d_trials"/"Static.c3d"
+    default_static_trc  = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Static.trc"
     default_scale_model = Path(__file__).resolve().parents[2] / "sample_data" / "gait2392_simbody.osim"
     default_marker_set  = Path(__file__).resolve().parents[2] / "sample_data" / "markerstheia.xml"
-    default_output_osim = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim" / "scaled_model.osim"
+    default_output_osim = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "scaled_model.osim"
 
     parser = argparse.ArgumentParser(description="Convert Theia3D C3D data into an OpenSim MOT file.")
     parser.add_argument("--c3d", type=Path, default=default_c3d,
@@ -49,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         "--static-c3d",
         type=Path,
         default=default_static_c3d,
-        # USER: set to your dedicated static C3D file, e.g. "sample_data/Static.c3d".
+        # USER: set to your dedicated static C3D file, e.g. "sample_data/c3d_trials/Static.c3d".
         #       Pass --no-static-c3d if you don't have one and want --static-frames
         #       (taken from the dynamic trial) instead.
         help=(
@@ -163,31 +162,6 @@ def main() -> int:
         static_source_label = f"{args.c3d} (dynamic trial)"
 
     # -------------------------------------------------------------------
-    # Step 3a: Resolve a pelvis reference pose. Pelvis tilt/list/rotation
-    # are computed relative to this pose instead of Theia's raw absolute
-    # rotation -- a pelvis orientation genuinely ~180 degrees from Theia's
-    # identity frame has no Euler representation that fits gait2392's
-    # declared +/-90 degree range for pelvis_tilt/list, so it must be
-    # re-referenced, not just reformatted. Uses --static-c3d / --static-frames
-    # when given; otherwise falls back to the middle frame of the dynamic
-    # trial (always in range, verified to remove the wrap and the out-of-range
-    # values across the test trials). Computed before the static TRC below so
-    # the TRC's marker positions and the coordinate .mot used for scaling can
-    # share the same reference frame -- see write_static_trc_from_c3d.
-    # -------------------------------------------------------------------
-    if args.static_c3d is not None or args.static_frames is not None:
-        reference_frame_indices = parse_frame_indices(static_frames_spec)
-    else:
-        _, dynamic_total_frames = get_frame_rate_and_count(c3d_obj)
-        reference_frame_indices = [dynamic_total_frames // 2]
-
-    pelvis_reference_pose = get_segment_reference_pose(
-        static_c3d_obj, "pelvis_4X4", reference_frame_indices
-    )
-    print(f"- Pelvis reference source: {static_source_label}")
-    print(f"- Pelvis reference frame(s): {[int(idx) for idx in reference_frame_indices]}")
-    print("")
-
     if want_static:
         frame_indices = parse_frame_indices(static_frames_spec)
 
@@ -196,7 +170,6 @@ def main() -> int:
             output_path=args.output_trc,
             frame_indices=frame_indices,
             repeat_frames=args.repeat_static_frames,
-            reference_pose=pelvis_reference_pose,
         )
 
         print(f"[PASS] Wrote OpenSim static TRC file: {trc_path}")
@@ -224,7 +197,7 @@ def main() -> int:
             print("")
         else:
             static_frame_rate, _ = get_frame_rate_and_count(static_c3d_obj)
-            static_df = build_mot_dataframe(static_c3d_obj, pelvis_reference_pose=pelvis_reference_pose)
+            static_df = build_mot_dataframe(static_c3d_obj)
             static_coords_path = args.output_osim.with_name(args.output_osim.stem + "_static_coords.mot")
             write_mot(static_df, static_coords_path)
 
@@ -256,7 +229,7 @@ def main() -> int:
     # Step 4: Build the dynamic motion table, optionally trim zero-only
     # edges, then validate and export.
     # -------------------------------------------------------------------
-    df = build_mot_dataframe(c3d_obj, pelvis_reference_pose=pelvis_reference_pose)
+    df = build_mot_dataframe(c3d_obj)
 
     if args.trim_zeros:
         df = trim_dataframe(df, frame_rate=frame_rate)
