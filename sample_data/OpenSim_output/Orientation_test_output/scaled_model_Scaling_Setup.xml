@@ -166,10 +166,10 @@
 				<objects />
 				<groups />
 			</ScaleSet>
-			<marker_file>D:/A_Work/A_Projects/Repos/Theia2OpenSim/sample_data/OpenSim_output/Static.trc</marker_file>
+			<marker_file>D:/A_Work/A_Projects/Repos/Theia2OpenSim/sample_data/OpenSim_output/Orientation_test_output/Static.trc</marker_file>
 			<time_range> 0.000000 0.050000</time_range>
 			<preserve_mass_distribution>false</preserve_mass_distribution>
-			<output_model_file>D:/A_Work/A_Projects/Repos/Theia2OpenSim/sample_data/OpenSim_output/scaled_model.osim</output_model_file>
+			<output_model_file>D:/A_Work/A_Projects/Repos/Theia2OpenSim/sample_data/OpenSim_output/Orientation_test_output/scaled_model.osim</output_model_file>
 			<output_scale_file>Unassigned</output_scale_file>
 		</ModelScaler>
 		<MarkerPlacer>
@@ -305,11 +305,11 @@
 				</objects>
 				<groups />
 			</IKTaskSet>
-			<marker_file>D:/A_Work/A_Projects/Repos/Theia2OpenSim/sample_data/OpenSim_output/Static.trc</marker_file>
-			<coordinate_file>D:/A_Work/A_Projects/Repos/Theia2OpenSim/sample_data/OpenSim_output/scaled_model_static_coords.mot</coordinate_file>
+			<marker_file>D:/A_Work/A_Projects/Repos/Theia2OpenSim/sample_data/OpenSim_output/Orientation_test_output/Static.trc</marker_file>
+			<coordinate_file>D:/A_Work/A_Projects/Repos/Theia2OpenSim/sample_data/OpenSim_output/Orientation_test_output/scaled_model_static_coords.mot</coordinate_file>
 			<time_range> 0.000000 0.050000</time_range>
-			<output_motion_file>D:/A_Work/A_Projects/Repos/Theia2OpenSim/sample_data/OpenSim_output/scaled_model_Scaling_Setup_static_ik.mot</output_motion_file>
-			<output_model_file>D:/A_Work/A_Projects/Repos/Theia2OpenSim/sample_data/OpenSim_output/scaled_model.osim</output_model_file>
+			<output_motion_file>D:/A_Work/A_Projects/Repos/Theia2OpenSim/sample_data/OpenSim_output/Orientation_test_output/scaled_model_Scaling_Setup_static_ik.mot</output_motion_file>
+			<output_model_file>D:/A_Work/A_Projects/Repos/Theia2OpenSim/sample_data/OpenSim_output/Orientation_test_output/scaled_model.osim</output_model_file>
 			<output_marker_file>Unassigned</output_marker_file>
 			<max_marker_movement>-1</max_marker_movement>
 		</MarkerPlacer>
