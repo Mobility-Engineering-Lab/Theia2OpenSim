@@ -10,6 +10,7 @@ from pathlib import Path
 from opensim_scaling import run_scale_tool, write_scale_setup_xml
 from workflow_utils import (
     REQUIRED_ROTATION_LABELS,
+    build_lab_to_opensim_rotation,
     build_mot_dataframe,
     find_missing_labels,
     get_frame_rate_and_count,
@@ -29,13 +30,13 @@ def parse_args() -> argparse.Namespace:
     #       OR leave them as-is and pass paths on the command line instead
     #       (e.g. --c3d "C:/MyData/trial01.c3d").
     # -------------------------------------------------------------------------
-    default_c3d         = Path(__file__).resolve().parents[2] / "sample_data" / "c3d_trials"/"RJogging.c3d"
-    default_out         = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "RJogging_test.mot"
+    default_c3d         = Path(__file__).resolve().parents[2] / "sample_data" / "c3d_trials"/"LSLDJ.c3d"
+    default_out         = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "LSLDJ_rot_test.mot"
     default_static_c3d  = Path(__file__).resolve().parents[2] / "sample_data" / "c3d_trials"/"Static.c3d"
-    default_static_trc  = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Static.trc"
+    default_static_trc  = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Static_rot_test.trc"
     default_scale_model = Path(__file__).resolve().parents[2] / "sample_data" / "gait2392_simbody.osim"
     default_marker_set  = Path(__file__).resolve().parents[2] / "sample_data" / "markerstheia.xml"
-    default_output_osim = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "scaled_model.osim"
+    default_output_osim = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "scaled_model_rot_test.osim"
 
     parser = argparse.ArgumentParser(description="Convert Theia3D C3D data into an OpenSim MOT file.")
     parser.add_argument("--c3d", type=Path, default=default_c3d,
@@ -44,35 +45,20 @@ def parse_args() -> argparse.Namespace:
                         help="Output .mot file path.")
     parser.add_argument("--trim-zeros", action="store_true",
                         help="Trim leading and trailing zeros per signal and rebase time.")
-    parser.add_argument(
-        "--static-c3d",
-        type=Path,
-        default=default_static_c3d,
+    parser.add_argument("--static-c3d", type=Path,default=default_static_c3d,
         # USER: set to your dedicated static C3D file, e.g. "sample_data/c3d_trials/Static.c3d".
         #       Pass --no-static-c3d if you don't have one and want --static-frames
         #       (taken from the dynamic trial) instead.
-        help=(
-            "Path to a dedicated static C3D file for TRC generation and scaling. "
-            f"Defaults to {default_static_c3d}."
-        ),
-    )
-    parser.add_argument(
-        "--no-static-c3d",
-        action="store_true",
-        help="Ignore --static-c3d's default; use --static-frames against the dynamic trial "
-             "instead, or produce .mot only if --static-frames is also omitted.",
-    )
-    parser.add_argument(
-        "--static-frames",
-        type=str,
-        default=None,
+                         help=("Path to a dedicated static C3D file for TRC generation and scaling. "
+                              f"Defaults to {default_static_c3d}." ), )
+    parser.add_argument("--no-static-c3d",action="store_true",
+                        help="Ignore --static-c3d's default; use --static-frames against the dynamic trial "
+                             "instead, or produce .mot only if --static-frames is also omitted.",)
+    parser.add_argument("--static-frames",type=str,default=None,
         # USER: choose a frame number (or range) where the subject is standing still,
         #       e.g. "300", "290:310", or "290,300,310".
-        help=(
-            'Frames to use for the static TRC (e.g. "300", "290:310", "290,300,310"). '
-            'Triggers TRC generation. Defaults to "300" when --static-c3d is provided alone.'
-        ),
-    )
+                        help=( 'Frames to use for the static TRC (e.g. "300", "290:310", "290,300,310"). '
+                               'Triggers TRC generation. Defaults to "300" when --static-c3d is provided alone.'),)
     parser.add_argument("--output-trc", type=Path, default=default_static_trc,
                         help="Output static .trc file path.")
     parser.add_argument("--repeat-static-frames", type=int, default=6,
@@ -89,19 +75,35 @@ def parse_args() -> argparse.Namespace:
                         help="Output scaled .osim model file path.")
     parser.add_argument("--subject-mass", type=float, default=75.1646,
                         help="Subject mass in kg, written into the ScaleTool setup (informational + mass distribution).")
-    parser.add_argument(
-        "--opensim-cmd",
-        type=Path,
-        default=None,
+    axis_choices = ["anterior","posterior","right", "left","up","down",]
+
+    parser.add_argument("--lab-x",choices=axis_choices, default="right",
+                         help="Physical direction of the positive laboratory X axis.",)
+    parser.add_argument("--lab-y",choices=axis_choices,default="anterior",
+                         help="Physical direction of the positive laboratory Y axis.",)
+    parser.add_argument("--lab-z",choices=axis_choices,default="up",
+                        help="Physical direction of the positive laboratory Z axis.",)
+    parser.add_argument("--opensim-cmd", type=Path,default=None,
         # USER: point this at OpenSim's bin/opensim-cmd(.exe), or set the
         #       OPENSIM_CMD environment variable instead.
-        help="Path to opensim-cmd(.exe). Falls back to $OPENSIM_CMD, then PATH.",
-    )
+                        help="Path to opensim-cmd(.exe). Falls back to $OPENSIM_CMD, then PATH.",)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+
+    lab_to_opensim_R = build_lab_to_opensim_rotation(
+        x_positive=args.lab_x,
+        y_positive=args.lab_y,
+        z_positive=args.lab_z,
+    )
+
+    print(
+        f"- Lab coordinates: "
+        f"+X={args.lab_x}, +Y={args.lab_y}, +Z={args.lab_z}"
+    )
+
     if args.no_static_c3d:
         args.static_c3d = None
 
@@ -170,6 +172,7 @@ def main() -> int:
             output_path=args.output_trc,
             frame_indices=frame_indices,
             repeat_frames=args.repeat_static_frames,
+            lab_to_opensim_R=lab_to_opensim_R,
         )
 
         print(f"[PASS] Wrote OpenSim static TRC file: {trc_path}")
@@ -197,7 +200,7 @@ def main() -> int:
             print("")
         else:
             static_frame_rate, _ = get_frame_rate_and_count(static_c3d_obj)
-            static_df = build_mot_dataframe(static_c3d_obj)
+            static_df = build_mot_dataframe(static_c3d_obj,lab_to_opensim_R=lab_to_opensim_R,)
             static_coords_path = args.output_osim.with_name(args.output_osim.stem + "_static_coords.mot")
             write_mot(static_df, static_coords_path)
 
@@ -229,7 +232,7 @@ def main() -> int:
     # Step 4: Build the dynamic motion table, optionally trim zero-only
     # edges, then validate and export.
     # -------------------------------------------------------------------
-    df = build_mot_dataframe(c3d_obj)
+    df = build_mot_dataframe(c3d_obj,lab_to_opensim_R=lab_to_opensim_R,)
 
     if args.trim_zeros:
         df = trim_dataframe(df, frame_rate=frame_rate)
