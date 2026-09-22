@@ -25,7 +25,7 @@ authors:
 identifiers:
   - type: url
     value: >-
-      https://github.com/Mobility-Engineering-Lab/Theia2OpenSim/releases/tag/v1.0.0-alpha
+      https://github.com/Mobility-Engineering-Lab/Theia2OpenSim/releases/tag/v1.1.0-beta
 repository-code: 'https://github.com/Mobility-Engineering-Lab/Theia2OpenSim'
 abstract: >-
   A Python toolbox for converting Theia3D markerless

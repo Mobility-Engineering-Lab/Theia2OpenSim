@@ -13,6 +13,7 @@ from pyomeca import Angles, Rototrans
 REQUIRED_ROTATION_LABELS = [
     "pelvis_4X4",
     "torso_4X4",
+    "head_4X4",
     "l_thigh_4X4",
     "l_shank_4X4",
     "l_foot_4X4",
@@ -27,56 +28,139 @@ REQUIRED_ROTATION_LABELS = [
 class WorkflowValidationError(RuntimeError):
     """Raised when required input data for the workflow is missing or invalid."""
 
-AXIS_DIRECTIONS_OPENSIM = {
-    # Direction vectors expressed in the OpenSim ground frame:
-    # +X = anterior, +Y = up, +Z = right
-    "anterior":  np.array([ 1.0,  0.0,  0.0]), "posterior": np.array([-1.0,  0.0,  0.0]),
-    "up":        np.array([ 0.0,  1.0,  0.0]), "down":      np.array([ 0.0, -1.0,  0.0]),
-    "right":     np.array([ 0.0,  0.0,  1.0]), "left":      np.array([ 0.0,  0.0, -1.0]),
-}
+DEFAULT_GCS_ROTATIONS = (
+    ("Z", -90.0),
+    ("X", -90.0),
+)
 
 
-def build_lab_to_opensim_rotation(
-    x_positive: str = "right",
-    y_positive: str = "anterior",
-    z_positive: str = "up",
+def _axis_rotation_matrix(axis: str, angle_deg: float) -> np.ndarray:
+    """
+    Return a 3x3 rotation matrix about X, Y, or Z.
+
+    Positive angles follow the right-hand rule.
+    """
+    axis = axis.upper()
+
+    if axis not in {"X", "Y", "Z"}:
+        raise WorkflowValidationError(
+            f"Invalid rotation axis '{axis}'. Use X, Y, or Z."
+        )
+
+    theta = np.deg2rad(float(angle_deg))
+    c = np.cos(theta)
+    s = np.sin(theta)
+
+    if axis == "X":
+        return np.array([
+            [1.0, 0.0, 0.0],
+            [0.0,   c,  -s],
+            [0.0,   s,   c],
+        ])
+
+    if axis == "Y":
+        return np.array([
+            [ c, 0.0,  s],
+            [0.0, 1.0, 0.0],
+            [-s, 0.0,  c],
+        ])
+
+    return np.array([
+        [c, -s, 0.0],
+        [s,  c, 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+
+
+def build_gcs_to_opensim_rotation(
+    rotations: Iterable[Tuple[str, float]],
 ) -> np.ndarray:
     """
-    Build a 3x3 rotation matrix that converts vectors/points from the
-    laboratory GCS to the OpenSim ground frame.
+    Construct the rotation matrix transforming coordinates from the
+    source laboratory GCS into the OpenSim GCS.
 
-    OpenSim target convention:
-        +X = anterior
-        +Y = up
-        +Z = right
+    Rotations are active, fixed-axis rotations applied in the order
+    supplied. Positive angles follow the right-hand rule.
 
-    Parameters describe the physical direction of each POSITIVE (+) LAB axis.
+    Example:
+        [("Z", -90), ("X", -90)]
+
+    applies:
+        1. -90 degrees about Z
+        2. -90 degrees about X
+
+    giving:
+        R_gcs_to_opensim = Rx(-90) @ Rz(-90)
+
+    For a column vector:
+        v_OpenSim = R_gcs_to_opensim @ v_source
     """
+    rotations = list(rotations)
 
-    try:
-        R = np.column_stack([
-            AXIS_DIRECTIONS_OPENSIM[x_positive.lower()],
-            AXIS_DIRECTIONS_OPENSIM[y_positive.lower()],
-            AXIS_DIRECTIONS_OPENSIM[z_positive.lower()],
-        ])
-    except KeyError as exc:
+    if len(rotations) > 3:
         raise WorkflowValidationError(
-            f"Unknown axis direction '{exc.args[0]}'. "
-            "Use anterior, posterior, right, left, up, or down."
-        ) from exc
+            "A maximum of three GCS rotations may be specified."
+        )
 
+    R = np.eye(3)
+
+    for axis, angle_deg in rotations:
+        R_step = _axis_rotation_matrix(axis, angle_deg)
+
+        # Rotations are applied in the order entered by the user.
+        R = R_step @ R
+
+    # Validate that the final matrix is a proper rotation matrix.
     if not np.allclose(R.T @ R, np.eye(3), atol=1e-8):
         raise WorkflowValidationError(
-            "Lab X/Y/Z directions must be mutually orthogonal."
+            "Generated GCS transformation is not orthonormal."
         )
 
     if not np.isclose(np.linalg.det(R), 1.0, atol=1e-8):
         raise WorkflowValidationError(
-            "Lab coordinate system must be right-handed. "
-            "Check the positive axis directions."
+            "Generated GCS transformation is not a proper rotation."
         )
 
     return R
+
+
+def parse_axis_angle_rotations(
+    rotation_specs: Iterable[str],
+) -> List[Tuple[str, float]]:
+    """
+    Convert strings such as:
+        ["Z:-90", "X:-90"]
+
+    into:
+        [("Z", -90.0), ("X", -90.0)]
+    """
+    rotations: List[Tuple[str, float]] = []
+
+    for spec in rotation_specs:
+        try:
+            axis, angle = spec.split(":", 1)
+            axis = axis.strip().upper()
+            angle_deg = float(angle)
+        except ValueError as exc:
+            raise WorkflowValidationError(
+                f"Invalid GCS rotation '{spec}'. "
+                "Use AXIS:ANGLE, for example Z:-90."
+            ) from exc
+
+        if axis not in {"X", "Y", "Z"}:
+            raise WorkflowValidationError(
+                f"Invalid rotation axis '{axis}'. Use X, Y, or Z."
+            )
+
+        rotations.append((axis, angle_deg))
+
+    if len(rotations) > 3:
+        raise WorkflowValidationError(
+            "A maximum of three GCS rotations may be specified."
+        )
+
+    return rotations
+
 
 def load_theia_c3d(c3d_path: str | Path) -> Dict:
     """Load a Theia3D-exported C3D file."""
@@ -214,7 +298,7 @@ def relative_segment_angles(parent_pose: np.ndarray, child_pose: np.ndarray, seq
     return _unwrap_degrees(angles, valid, axis=-1)
 
 
-def build_mot_dataframe(c3d_obj: Dict,lab_to_opensim_R: np.ndarray | None = None,) -> pd.DataFrame:
+def build_mot_dataframe(c3d_obj: Dict,gcs_to_opensim_R: np.ndarray | None = None,) -> pd.DataFrame:
     # Build the OpenSim motion table one signal block at a time.
 
     frame_rate, total_frames = get_frame_rate_and_count(c3d_obj)
@@ -233,47 +317,60 @@ def build_mot_dataframe(c3d_obj: Dict,lab_to_opensim_R: np.ndarray | None = None
     r_shank = get_segment_pose(c3d_obj, "r_shank_4X4")
     r_foot = get_segment_pose(c3d_obj, "r_foot_4X4")
 
-    # Pelvis angles are used as the OpenSim pelvis columns. Sequence must be
-    # 'zxy' (intrinsic Z -> X -> Y), matching gait2392's ground_pelvis.
-
     # ---------------------------------------------------------------
-    # Laboratory/global frame -> OpenSim ground frame
+    # Source laboratory GCS -> OpenSim GCS
     # ---------------------------------------------------------------
-    if lab_to_opensim_R is None:
-        # Current/default Theia laboratory convention:
-        # +X = right, +Y = anterior, +Z = up
-        lab_to_opensim_R = build_lab_to_opensim_rotation(
-            "right",
-            "anterior",
-            "up",
+    if gcs_to_opensim_R is None:
+        gcs_to_opensim_R = build_gcs_to_opensim_rotation(
+            DEFAULT_GCS_ROTATIONS
         )
 
-    # Homogeneous lab -> OpenSim ground transform.
-    G = np.eye(4)
-    G[:3, :3] = lab_to_opensim_R
-
-    # ---------------------------------------------------------------
-    # Fixed Theia pelvis local-basis -> gait2392 pelvis-basis
-    # correction.
+    # Transform pelvis orientation:
+    # R_pelvis^OpenSim =
+    #     R_GCS^OpenSim @ R_pelvis^source
     #
-    # This is the RIGHT-side transformation from the existing
-    # H.T @ pelvis @ H implementation. It is independent of the
-    # laboratory GCS orientation.
+    # Transform pelvis position:
+    # r_pelvis^OpenSim =
+    #     R_GCS^OpenSim @ r_pelvis^source
+    
     # ---------------------------------------------------------------
-    H_local = np.eye(4)
-    H_local[:3, :3] = np.array([
+    # Fixed Theia pelvis-local -> OpenSim gait2392 pelvis-local mapping
+    # ---------------------------------------------------------------
+    pelvis_local_to_opensim_R = np.array([
         [0.0, 0.0, 1.0],
         [1.0, 0.0, 0.0],
         [0.0, 1.0, 0.0],
     ])
 
-    # Express pelvis pose in the OpenSim ground/model convention.
-    pelvis_os = np.einsum(
+    pelvis_os = np.zeros_like(pelvis)
+
+    # Pelvis orientation:
+    #
+    # R_pelvis^OpenSim =
+    #     R_GCS^OpenSim
+    #     @ R_pelvis^Theia
+    #     @ R_local
+    #
+    # Left side:
+    #   laboratory GCS -> OpenSim GCS
+    #
+    # Right side:
+    #   Theia pelvis local basis -> gait2392 pelvis local basis
+    pelvis_os[:3, :3, :] = np.einsum(
         "ij,jkt,kl->ilt",
-        G,
-        pelvis,
-        H_local,
+        gcs_to_opensim_R,
+        pelvis[:3, :3, :],
+        pelvis_local_to_opensim_R,
     )
+
+    # Pelvis position is a point in the laboratory GCS, so it only
+    # requires the global coordinate-system transformation.
+    pelvis_os[:3, 3, :] = (
+        gcs_to_opensim_R @ pelvis[:3, 3, :]
+    )
+
+    pelvis_os[3, 3, :] = 1.0
+
 
     identity_ref = np.repeat(
     np.eye(4)[:, :, None],
@@ -281,6 +378,8 @@ def build_mot_dataframe(c3d_obj: Dict,lab_to_opensim_R: np.ndarray | None = None
     axis=2,
 )
 
+    # Pelvis angles are used as the OpenSim pelvis columns. Sequence must be
+    # 'zxy' (intrinsic Z -> X -> Y), matching gait2392's ground_pelvis.
     pelvis_angles = relative_segment_angles(
         identity_ref,
         pelvis_os,
@@ -319,7 +418,8 @@ def build_mot_dataframe(c3d_obj: Dict,lab_to_opensim_R: np.ndarray | None = None
         "hip_rotation_l":  -hip_angles_l[2, 0, :],
         "knee_angle_l": knee_angles_l[0, 0, :],
         "ankle_angle_l": ankle_angles_l[0, 0, :],
-        # Pelvis translations: convert mm to m. Axis mapping Theia→OpenSim: Y→X, Z→Y, X→Z.
+        # Pelvis translations: already expressed in the OpenSim ground frame by
+        # lab_to_opensim_R above
         "pelvis_tx": pelvis_tx_source / 1000.0,
         "pelvis_ty": pelvis_os[1, 3, :] / 1000.0,
         "pelvis_tz": pelvis_tz_source / 1000.0,
@@ -406,6 +506,11 @@ DEFAULT_TRC_MARKER_SEGMENT_MAP = {
     "RTOE": "r_toes_4X4",
     "LTOE": "l_toes_4X4",
     "PELVIS": "pelvis_4X4",
+    # HEAD drives the torso measurement. Theia's torso_4X4 origin sits at
+    # ~C7, only ~94 mm below head_4X4, so a TORSO-HEAD pair is far too short
+    # to derive a stable scale factor from. The PELVIS-HEAD span (~523 mm) is
+    # used instead -- see the "torso" Measurement in opensim_scaling.
+    "HEAD": "head_4X4",
 }
 
 
@@ -434,32 +539,37 @@ def extract_virtual_marker_positions(
     c3d_obj: Dict,
     frame_indices: Iterable[int],
     marker_segment_map: Dict[str, str] | None = None,
-    lab_to_opensim_R: np.ndarray | None = None,
+    gcs_to_opensim_R: np.ndarray | None = None,
 ) -> Dict[str, np.ndarray]:
+    """    
+    Extract virtual-marker positions from Theia3D segment origins and
+    express them in the OpenSim GCS.
+
+    The segment origins are obtained from the translational component
+    of each 4x4 pose matrix and are retained in millimetres for TRC export.
+  
     """
-    Extract virtual marker positions from Theia3D segment origins.
-    Theia3D stores each segment as a 4 x 4 pose matrix. The translational
-    component is the first three entries of the final column, i.e., pose[:3, 3, :].
-    Positions are kept in millimetres for the OpenSim .trc file.
-    """
-    if lab_to_opensim_R is None:
-        lab_to_opensim_R = build_lab_to_opensim_rotation(
-            "right",
-            "anterior",
-            "up",
+    if gcs_to_opensim_R is None:
+        gcs_to_opensim_R = build_gcs_to_opensim_rotation(
+            DEFAULT_GCS_ROTATIONS
         )
 
     if marker_segment_map is None:
         marker_segment_map = DEFAULT_TRC_MARKER_SEGMENT_MAP
 
     frames = np.asarray(list(frame_indices), dtype=int)
+
     if frames.size == 0:
-        raise WorkflowValidationError("No static frames were selected for TRC generation.")
+        raise WorkflowValidationError(
+            "No static frames were selected for TRC generation."
+        )
 
     _, total_frames = get_frame_rate_and_count(c3d_obj)
+
     if np.any(frames < 0) or np.any(frames >= total_frames):
         raise WorkflowValidationError(
-            f"Selected static frame(s) out of range. Valid range is 0 to {total_frames - 1}."
+            f"Selected static frame(s) out of range. "
+            f"Valid range is 0 to {total_frames - 1}."
         )
 
     marker_positions: Dict[str, np.ndarray] = {}
@@ -467,11 +577,18 @@ def extract_virtual_marker_positions(
     for marker_name, segment_label in marker_segment_map.items():
         pose = get_segment_pose(c3d_obj, segment_label)
 
+        # Segment origin expressed in the source laboratory GCS.
         origin = pose[:3, 3, :]
 
-        # Apply notebook coordinate mapping and average selected static frames.
-        mapped_origin = lab_to_opensim_R @ origin[:, frames]
-        marker_positions[marker_name] = np.mean(mapped_origin, axis=1)
+        # Source GCS -> OpenSim GCS.
+        mapped_origin = (
+            gcs_to_opensim_R @ origin[:, frames]
+        )
+
+        marker_positions[marker_name] = np.mean(
+            mapped_origin,
+            axis=1,
+        )
 
     return marker_positions
 
@@ -533,7 +650,7 @@ def write_static_trc_from_c3d(
     frame_indices: Iterable[int],
     repeat_frames: int = 6,
     marker_segment_map: Dict[str, str] | None = None,
-    lab_to_opensim_R: np.ndarray | None = None,
+    gcs_to_opensim_R: np.ndarray | None = None,
 ) -> Path:
     """
     Build and write a static .trc file directly from a Theia3D C3D file.
@@ -543,7 +660,7 @@ def write_static_trc_from_c3d(
         c3d_obj=c3d_obj,
         frame_indices=frame_indices,
         marker_segment_map=marker_segment_map,
-        lab_to_opensim_R=lab_to_opensim_R,
+        gcs_to_opensim_R=gcs_to_opensim_R,
     )
 
     return write_static_trc(

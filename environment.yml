@@ -2,16 +2,21 @@ name: theia2opensim
 channels:
   - conda-forge
 dependencies:
-  - python=3.10
+  - python=3.11
   - pip>=24
-  - numpy>=1.26,<3
+  - numpy>=1.23,<3
   - pandas>=2.2,<3
+  - ezc3d>=1.7.0
+  - opensim=4.5.2
   - ipykernel
   - jupyterlab
-  - pip
   - pip:
-      - ezc3d>=1.7.0
       - pyomeca>=2024.0.2
 
-# Optional dependency for OpenSim Python API is not included by default.
-# Install manually when needed based on your platform/distribution.
+# opensim and ezc3d are both installed from conda-forge deliberately, not
+# ezc3d via pip: OpenSim's own package bundles a private ezc3d.dll built
+# against a different ABI than the pip wheel, and importing both opensim and
+# the pip ezc3d in one process crashes with "ImportError: DLL load failed"
+# on Windows regardless of import order. The conda-forge ezc3d build shares
+# opensim's toolchain and does not have this problem. Do not switch ezc3d
+# back to the pip package here.

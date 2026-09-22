@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import os
-import shutil
 from pathlib import Path
 
-from opensim_scaling import run_scale_tool, write_scale_setup_xml
+from opensim_scaling import run_scale_tool
 from workflow_utils import (
     REQUIRED_ROTATION_LABELS,
-    build_lab_to_opensim_rotation,
+    DEFAULT_GCS_ROTATIONS,
+    build_gcs_to_opensim_rotation,
+    parse_axis_angle_rotations,
     build_mot_dataframe,
     find_missing_labels,
     get_frame_rate_and_count,
@@ -26,17 +26,17 @@ from workflow_utils import (
 
 def parse_args() -> argparse.Namespace:
     # -------------------------------------------------------------------------
-    # USER: edit the three lines below to point to your own files,
+    # USER: edit the default paths below to point to your own files,
     #       OR leave them as-is and pass paths on the command line instead
     #       (e.g. --c3d "C:/MyData/trial01.c3d").
     # -------------------------------------------------------------------------
-    default_c3d         = Path(__file__).resolve().parents[2] / "sample_data" / "c3d_trials"/"LSLDJ.c3d"
-    default_out         = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "LSLDJ_rot_test.mot"
+    default_c3d         = Path(__file__).resolve().parents[2] / "sample_data" /"Orientation_test"/"Hopping_FL_filt.c3d"
+    default_out         = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Orientation_test_output"/"Hopping_FL_filt_rot_test.mot"
     default_static_c3d  = Path(__file__).resolve().parents[2] / "sample_data" / "c3d_trials"/"Static.c3d"
-    default_static_trc  = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Static_rot_test.trc"
+    default_static_trc  = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Orientation_test_output"/"Static_rot_test.trc"
     default_scale_model = Path(__file__).resolve().parents[2] / "sample_data" / "gait2392_simbody.osim"
     default_marker_set  = Path(__file__).resolve().parents[2] / "sample_data" / "markerstheia.xml"
-    default_output_osim = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "scaled_model_rot_test.osim"
+    default_output_osim = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Orientation_test_output"/"scaled_model_rot_test.osim"
 
     parser = argparse.ArgumentParser(description="Convert Theia3D C3D data into an OpenSim MOT file.")
     parser.add_argument("--c3d", type=Path, default=default_c3d,
@@ -65,43 +65,51 @@ def parse_args() -> argparse.Namespace:
                         help="Number of repeated frames written to the static .trc file.")
     parser.add_argument("--no-scale", action="store_true",
                         help="Skip running OpenSim's Scale Tool. By default, the Scale Tool runs "
-                             "automatically (via opensim-cmd) whenever a static source is given "
-                             "(--static-c3d or --static-frames); pass this to opt out.")
+                             "automatically (via the OpenSim Python API) whenever a static source is "
+                             "given (--static-c3d or --static-frames); pass this to opt out.")
     parser.add_argument("--scale-model", type=Path, default=default_scale_model,
                         help="Generic (unscaled) .osim model file to scale.")
     parser.add_argument("--marker-set", type=Path, default=default_marker_set,
                         help="OpenSim MarkerSet .xml file matching DEFAULT_TRC_MARKER_SEGMENT_MAP's marker names.")
     parser.add_argument("--output-osim", type=Path, default=default_output_osim,
                         help="Output scaled .osim model file path.")
-    parser.add_argument("--subject-mass", type=float, default=75.1646,
-                        help="Subject mass in kg, written into the ScaleTool setup (informational + mass distribution).")
-    axis_choices = ["anterior","posterior","right", "left","up","down",]
-
-    parser.add_argument("--lab-x",choices=axis_choices, default="right",
-                         help="Physical direction of the positive laboratory X axis.",)
-    parser.add_argument("--lab-y",choices=axis_choices,default="anterior",
-                         help="Physical direction of the positive laboratory Y axis.",)
-    parser.add_argument("--lab-z",choices=axis_choices,default="up",
-                        help="Physical direction of the positive laboratory Z axis.",)
-    parser.add_argument("--opensim-cmd", type=Path,default=None,
-        # USER: point this at OpenSim's bin/opensim-cmd(.exe), or set the
-        #       OPENSIM_CMD environment variable instead.
-                        help="Path to opensim-cmd(.exe). Falls back to $OPENSIM_CMD, then PATH.",)
+    # USER: measure this for your subject. There is deliberately no default --
+    #       the scaled model takes this as its total mass, so a wrong value
+    #       propagates straight into inverse-dynamics joint moments.
+    parser.add_argument("--subject-mass", type=float, required=True,
+                        help="Subject mass in kg (required). Sets the scaled model's total mass, "
+                             "which downstream inverse dynamics depends on.")
+    parser.add_argument("--gcs-rot", nargs="*", default=None, metavar="AXIS:DEG",
+        help=("Ordered axis-angle rotations transforming the source laboratory "
+              "GCS into the OpenSim GCS. " 'Example: --gcs-rot Z:-90 X:-90. '
+              "Up to three rotations may be specified."),)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
 
-    lab_to_opensim_R = build_lab_to_opensim_rotation(
-        x_positive=args.lab_x,
-        y_positive=args.lab_y,
-        z_positive=args.lab_z,
+    if args.gcs_rot is None:
+        gcs_rotations = list(DEFAULT_GCS_ROTATIONS)
+    else:
+        gcs_rotations = parse_axis_angle_rotations(
+            args.gcs_rot
+        )
+
+    gcs_to_opensim_R = build_gcs_to_opensim_rotation(
+        gcs_rotations
     )
 
+    if gcs_rotations:
+        rotation_text = " -> ".join(
+            f"{axis}:{angle:g}°"
+            for axis, angle in gcs_rotations
+        )
+    else:
+        rotation_text = "identity"
+
     print(
-        f"- Lab coordinates: "
-        f"+X={args.lab_x}, +Y={args.lab_y}, +Z={args.lab_z}"
+        f"- Source GCS -> OpenSim GCS: {rotation_text}"
     )
 
     if args.no_static_c3d:
@@ -172,7 +180,7 @@ def main() -> int:
             output_path=args.output_trc,
             frame_indices=frame_indices,
             repeat_frames=args.repeat_static_frames,
-            lab_to_opensim_R=lab_to_opensim_R,
+            gcs_to_opensim_R=gcs_to_opensim_R,
         )
 
         print(f"[PASS] Wrote OpenSim static TRC file: {trc_path}")
@@ -182,57 +190,46 @@ def main() -> int:
         print("")
 
     # -------------------------------------------------------------------
-    # Step 3b: Run OpenSim's Scale Tool whenever a static source was given
-    # (opt out with --no-scale). Needs a coordinate .mot describing the same
-    # static pose as the TRC above -- built here from static_c3d_obj using
-    # the same pelvis_reference_pose, so both inputs to MarkerPlacer's IK
-    # describe one consistent pose (see write_static_trc_from_c3d /
-    # extract_virtual_marker_positions). A missing opensim-cmd is a warning,
-    # not a hard failure, since the .mot export below doesn't depend on it.
+    # Step 3b: Run OpenSim's Scale Tool (via the OpenSim Python API) whenever
+    # a static source was given (opt out with --no-scale). Needs a
+    # coordinate .mot describing the same static pose as the TRC above --
+    # built here from static_c3d_obj using the same lab_to_opensim_R, so both
+    # inputs to MarkerPlacer's IK describe one consistent pose (see
+    # write_static_trc_from_c3d / extract_virtual_marker_positions).
     # -------------------------------------------------------------------
     if want_static and not args.no_scale:
-        opensim_cmd = args.opensim_cmd or os.environ.get("OPENSIM_CMD")
-        resolved_opensim_cmd = str(opensim_cmd) if opensim_cmd is not None else shutil.which("opensim-cmd")
+        static_frame_rate, _ = get_frame_rate_and_count(static_c3d_obj)
+        static_df = build_mot_dataframe(static_c3d_obj, gcs_to_opensim_R=gcs_to_opensim_R,)
+        static_coords_path = args.output_osim.with_name(args.output_osim.stem + "_static_coords.mot")
+        write_mot(static_df, static_coords_path)
 
-        if not resolved_opensim_cmd or not Path(resolved_opensim_cmd).exists():
-            print("[SKIP] Scale Tool: opensim-cmd not found. Pass --opensim-cmd, set OPENSIM_CMD, "
-                  "or add --no-scale to silence this.")
-            print("")
+        setup_xml_path = args.output_osim.with_name(args.output_osim.stem + "_Scaling_Setup.xml")
+        time_range = (0.0, (args.repeat_static_frames - 1) / static_frame_rate)
+        result = run_scale_tool(
+            model_file=args.scale_model,
+            marker_set_file=args.marker_set,
+            marker_file=args.output_trc,
+            coordinate_file=static_coords_path,
+            output_model_file=args.output_osim,
+            time_range=time_range,
+            mass=args.subject_mass,
+            setup_xml_path=setup_xml_path,
+        )
+
+        if result.success:
+            print(f"[PASS] Wrote scaled OpenSim model: {result.output_model_file}")
+            if result.marker_rms is not None:
+                print(f"- Marker error: RMS = {result.marker_rms:.4f} m, max = {result.marker_max:.4f} m ({result.marker_max_name})")
         else:
-            static_frame_rate, _ = get_frame_rate_and_count(static_c3d_obj)
-            static_df = build_mot_dataframe(static_c3d_obj,lab_to_opensim_R=lab_to_opensim_R,)
-            static_coords_path = args.output_osim.with_name(args.output_osim.stem + "_static_coords.mot")
-            write_mot(static_df, static_coords_path)
-
-            setup_xml_path = args.output_osim.with_name(args.output_osim.stem + "_Scaling_Setup.xml")
-            time_range = (0.0, (args.repeat_static_frames - 1) / static_frame_rate)
-            write_scale_setup_xml(
-                output_xml_path=setup_xml_path,
-                model_file=args.scale_model,
-                marker_set_file=args.marker_set,
-                marker_file=args.output_trc,
-                coordinate_file=static_coords_path,
-                output_model_file=args.output_osim,
-                time_range=time_range,
-                mass=args.subject_mass,
-            )
-
-            result = run_scale_tool(setup_xml_path, args.output_osim, opensim_cmd=resolved_opensim_cmd)
-
-            if result.success:
-                print(f"[PASS] Wrote scaled OpenSim model: {result.output_model_file}")
-                if result.marker_rms is not None:
-                    print(f"- Marker error: RMS = {result.marker_rms:.4f} m, max = {result.marker_max:.4f} m ({result.marker_max_name})")
-            else:
-                print("[FAIL] OpenSim Scale Tool did not complete successfully:")
-                print(result.stdout)
-            print("")
+            print("[FAIL] OpenSim Scale Tool did not complete successfully:")
+            print(result.log_text)
+        print("")
 
     # -------------------------------------------------------------------
     # Step 4: Build the dynamic motion table, optionally trim zero-only
     # edges, then validate and export.
     # -------------------------------------------------------------------
-    df = build_mot_dataframe(c3d_obj,lab_to_opensim_R=lab_to_opensim_R,)
+    df = build_mot_dataframe(c3d_obj,gcs_to_opensim_R=gcs_to_opensim_R,)
 
     if args.trim_zeros:
         df = trim_dataframe(df, frame_rate=frame_rate)
