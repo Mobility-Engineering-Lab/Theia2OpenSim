@@ -1,4 +1,4 @@
-"""Validate notebook-derived Theia3D to OpenSim workflow on a C3D input."""
+"""Validate Theia3D to OpenSim workflow on a C3D input."""
 
 from __future__ import annotations
 

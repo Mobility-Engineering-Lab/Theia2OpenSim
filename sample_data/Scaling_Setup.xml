@@ -49,6 +49,30 @@
 							<groups />
 						</BodyScaleSet>
 					</Measurement>
+					<Measurement name="torso">
+						<!--Flag to turn on and off scaling for this measurement.-->
+						<apply>true</apply>
+						<!--Set of marker pairs used to determine the scale factors.-->
+						<MarkerPairSet>
+							<objects>
+								<MarkerPair>
+									<!--Names of two markers, the distance between which is used to compute a body scale factor.-->
+									<markers> PELVIS HEAD</markers>
+								</MarkerPair>
+							</objects>
+							<groups />
+						</MarkerPairSet>
+						<!--Set of bodies to be scaled by this measurement.-->
+						<BodyScaleSet>
+							<objects>
+								<BodyScale name="torso">
+									<!--Axes (X Y Z) along which to scale a body. For example, 'X Y Z' scales along all three axes, and 'Y' scales just along the Y axis.-->
+									<axes> X Y Z</axes>
+								</BodyScale>
+							</objects>
+							<groups />
+						</BodyScaleSet>
+					</Measurement>
 					<Measurement name="femur r">
 						<!--Flag to turn on and off scaling for this measurement.-->
 						<apply>true</apply>
@@ -173,10 +197,6 @@
 									<!--Axes (X Y Z) along which to scale a body. For example, 'X Y Z' scales along all three axes, and 'Y' scales just along the Y axis.-->
 									<axes> X Y Z</axes>
 								</BodyScale>
-								<BodyScale name="talus_l">
-									<!--Axes (X Y Z) along which to scale a body. For example, 'X Y Z' scales along all three axes, and 'Y' scales just along the Y axis.-->
-									<axes> X Y Z</axes>
-								</BodyScale>
 							</objects>
 							<groups />
 						</BodyScaleSet>
@@ -197,6 +217,10 @@
 						<!--Set of bodies to be scaled by this measurement.-->
 						<BodyScaleSet>
 							<objects>
+								<BodyScale name="talus_l">
+									<!--Axes (X Y Z) along which to scale a body. For example, 'X Y Z' scales along all three axes, and 'Y' scales just along the Y axis.-->
+									<axes> X Y Z</axes>
+								</BodyScale>
 								<BodyScale name="calcn_l">
 									<!--Axes (X Y Z) along which to scale a body. For example, 'X Y Z' scales along all three axes, and 'Y' scales just along the Y axis.-->
 									<axes> X Y Z</axes>
@@ -284,6 +308,12 @@
 						<weight>5</weight>
 					</IKMarkerTask>
 					<IKMarkerTask name="PELVIS">
+						<!--Whether or not this task will be used during inverse kinematics solve, default is true.-->
+						<apply>true</apply>
+						<!--Weight given to the task when solving inverse kinematics problems, default is 0.-->
+						<weight>5</weight>
+					</IKMarkerTask>
+					<IKMarkerTask name="HEAD">
 						<!--Whether or not this task will be used during inverse kinematics solve, default is true.-->
 						<apply>true</apply>
 						<!--Weight given to the task when solving inverse kinematics problems, default is 0.-->
@@ -430,6 +460,36 @@
 						<value>0</value>
 					</IKCoordinateTask>
 					<IKCoordinateTask name="subtalar_angle_l">
+						<!--Whether or not this task will be used during inverse kinematics solve, default is true.-->
+						<apply>true</apply>
+						<!--Weight given to the task when solving inverse kinematics problems, default is 0.-->
+						<weight>100</weight>
+						<!--Indicates the source of the coordinate value for this task.  Possible values are default_value (use default value of coordinate, as specified in the model file, as the fixed target value), manual_value (use the value specified in the value property of this task as the fixed target value), or from_file (use the coordinate values from the coordinate data specified by the coordinates_file property).-->
+						<value_type>from_file</value_type>
+						<!--This value will be used as the desired (or prescribed) coordinate value if value_type is set to manual_value.-->
+						<value>0</value>
+					</IKCoordinateTask>
+					<IKCoordinateTask name="lumbar_extension">
+						<!--Whether or not this task will be used during inverse kinematics solve, default is true.-->
+						<apply>true</apply>
+						<!--Weight given to the task when solving inverse kinematics problems, default is 0.-->
+						<weight>100</weight>
+						<!--Indicates the source of the coordinate value for this task.  Possible values are default_value (use default value of coordinate, as specified in the model file, as the fixed target value), manual_value (use the value specified in the value property of this task as the fixed target value), or from_file (use the coordinate values from the coordinate data specified by the coordinates_file property).-->
+						<value_type>from_file</value_type>
+						<!--This value will be used as the desired (or prescribed) coordinate value if value_type is set to manual_value.-->
+						<value>0</value>
+					</IKCoordinateTask>
+					<IKCoordinateTask name="lumbar_bending">
+						<!--Whether or not this task will be used during inverse kinematics solve, default is true.-->
+						<apply>true</apply>
+						<!--Weight given to the task when solving inverse kinematics problems, default is 0.-->
+						<weight>100</weight>
+						<!--Indicates the source of the coordinate value for this task.  Possible values are default_value (use default value of coordinate, as specified in the model file, as the fixed target value), manual_value (use the value specified in the value property of this task as the fixed target value), or from_file (use the coordinate values from the coordinate data specified by the coordinates_file property).-->
+						<value_type>from_file</value_type>
+						<!--This value will be used as the desired (or prescribed) coordinate value if value_type is set to manual_value.-->
+						<value>0</value>
+					</IKCoordinateTask>
+					<IKCoordinateTask name="lumbar_rotation">
 						<!--Whether or not this task will be used during inverse kinematics solve, default is true.-->
 						<apply>true</apply>
 						<!--Weight given to the task when solving inverse kinematics problems, default is 0.-->
