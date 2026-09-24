@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -162,9 +163,23 @@ def parse_axis_angle_rotations(
     return rotations
 
 
-def load_theia_c3d(c3d_path: str | Path) -> Dict:
-    """Load a Theia3D-exported C3D file."""
-    return c3d(str(c3d_path))
+def load_theia_c3d(c3d_path: str | Path, extract_force_platforms: bool = False) -> Dict:
+    """Load a Theia3D-exported C3D file.
+
+    extract_force_platforms=True additionally has ezc3d resolve each force
+    platform's analog channels into force/moment/center-of-pressure arrays
+    (c3d_obj["data"]["platform"]), needed by build_grf_dataframe. Left False
+    by default since kinematics-only loading doesn't need it.
+    """
+    return c3d(str(c3d_path), extract_forceplat_data=extract_force_platforms)
+
+
+def get_force_platform_count(c3d_obj: Dict) -> int:
+    """Number of force platforms marked USED in this C3D (0 if none/absent)."""
+    try:
+        return int(np.asarray(c3d_obj["parameters"]["FORCE_PLATFORM"]["USED"]["value"]).squeeze())
+    except KeyError:
+        return 0
 
 
 def get_rotation_labels(c3d_obj: Dict) -> List[str]:
@@ -181,6 +196,39 @@ def get_frame_rate_and_count(c3d_obj: Dict) -> Tuple[float, int]:
     frame_rate = float(np.asarray(c3d_obj["parameters"]["POINT"]["RATE"]["value"]).squeeze())
     total_frames = int(np.asarray(c3d_obj["parameters"]["POINT"]["FRAMES"]["value"]).squeeze())
     return frame_rate, total_frames
+
+
+def get_actual_frame_range(c3d_obj: Dict) -> Tuple[int, int]:
+    """
+    Return (start, end) as 1-indexed frame numbers on the *original*,
+    un-cropped recording's frame clock, read from the C3D's
+    TRIAL:ACTUAL_START_FIELD / TRIAL:ACTUAL_END_FIELD parameters. Per the C3D
+    spec each is stored as a [low_word, high_word] pair, combined here as
+    low + high*65536.
+
+    Two separate C3D exports of the same capture session (e.g. a
+    marker+force export and a separately-processed markerless kinematics
+    export) each keep their own frame numbering relative to this shared
+    clock, even when trimmed to different, non-identical windows -- so
+    intersecting these ranges (see align_ik_and_grf_dataframes) locates the
+    footage they actually have in common, which duration or "both start at
+    t=0" comparisons cannot reliably do.
+
+    Falls back to the POINT header's first_frame/last_frame (0-indexed, so
+    +1 here) when the TRIAL group is absent.
+    """
+    trial = c3d_obj["parameters"].get("TRIAL", {})
+    if "ACTUAL_START_FIELD" in trial and "ACTUAL_END_FIELD" in trial:
+        def _combine(value) -> int:
+            words = np.asarray(value).flatten()
+            if words.size >= 2:
+                return int(words[0]) + int(words[1]) * 65536
+            return int(words[0])
+
+        return _combine(trial["ACTUAL_START_FIELD"]["value"]), _combine(trial["ACTUAL_END_FIELD"]["value"])
+
+    header_points = c3d_obj["header"]["points"]
+    return int(header_points["first_frame"]) + 1, int(header_points["last_frame"]) + 1
 
 
 def _rotation_data_transposed(c3d_obj: Dict) -> np.ndarray:
@@ -218,6 +266,20 @@ def get_segment_pose(c3d_obj: Dict, segment_label: str) -> np.ndarray:
     pose[3, :, :] = np.array([0.0, 0.0, 0.0, 1.0])[:, np.newaxis]
     pose[:3, 3, :] *= _translation_scale_to_mm(c3d_obj)
     return pose
+
+
+def get_segment_positions_opensim(
+    c3d_obj: Dict,
+    segment_label: str,
+    gcs_to_opensim_R: np.ndarray,
+) -> np.ndarray:
+    """Return (3, n_frames) position (meters, OpenSim ground frame) of a
+    Theia segment's origin across every frame of c3d_obj, applying the same
+    lab-to-OpenSim rotation used throughout this module (see
+    build_mot_dataframe / build_grf_dataframe) -- no translation, since the
+    source lab origin already coincides with OpenSim's ground origin here."""
+    translation_mm = get_segment_pose(c3d_obj, segment_label)[:3, 3, :]
+    return (gcs_to_opensim_R @ translation_mm) / 1000.0
 
 
 def _ensure_degrees(values: np.ndarray) -> np.ndarray:
@@ -429,6 +491,263 @@ def build_mot_dataframe(c3d_obj: Dict,gcs_to_opensim_R: np.ndarray | None = None
     }
 
     return pd.DataFrame(data)
+
+
+_GRF_LENGTH_TO_M = {"mm": 0.001, "cm": 0.01, "m": 1.0}
+_GRF_FORCE_TO_N = {"n": 1.0}
+_GRF_MOMENT_TO_NM = {"nmm": 0.001, "ncm": 0.01, "nm": 1.0}
+
+
+def _grf_unit_scale(unit: str, table: Dict[str, float], quantity: str) -> float:
+    # Force-platform units (unit_position/unit_force/unit_moment) are reported
+    # per-platform by ezc3d and aren't guaranteed to match POINT:UNITS -- read
+    # and convert explicitly rather than assuming, same principle as
+    # _translation_scale_to_mm above.
+    key = str(unit).strip().lower()
+    if key in table:
+        return table[key]
+    raise WorkflowValidationError(
+        f"Unsupported force-platform {quantity} unit '{unit}' (expected one of {sorted(table)})."
+    )
+
+
+def build_grf_dataframe(
+    c3d_obj: Dict,
+    gcs_to_opensim_R: np.ndarray | None = None,
+    force_threshold: float = 20.0,
+) -> pd.DataFrame:
+    """
+    Build an OpenSim ground-reaction-force table (one block of columns per
+    force platform) from a C3D loaded with load_theia_c3d(...,
+    extract_force_platforms=True).
+
+    Standalone from build_mot_dataframe -- GRF is analog-rate data (typically
+    much faster than the POINT-rate kinematics), so this keeps its own native
+    time base rather than being resampled to match the .mot above. It reuses
+    the same gcs_to_opensim_R rotation (see build_gcs_to_opensim_rotation /
+    DEFAULT_GCS_ROTATIONS) so both outputs describe one consistent OpenSim
+    ground frame.
+
+    force_threshold (N): samples where a platform's vertical force is below
+    this are treated as unloaded and zeroed out entirely (force, moment,
+    torque, and center of pressure all set to 0). This matters because the
+    center of pressure is computed as a ratio against vertical force -- at
+    exactly zero force it is mathematically undefined (ezc3d reports NaN,
+    which OpenSim's file reader cannot parse), and near zero it is dominated
+    by analog noise, jittering by tens of millimeters between samples despite
+    no real contact. Without this, an unfiltered GRF file either fails to
+    load in OpenSim or feeds Inverse Dynamics physically meaningless torques
+    during swing phase.
+    """
+    if "platform" not in c3d_obj.get("data", {}):
+        raise WorkflowValidationError(
+            "No force-platform data in this C3D object. Load it with "
+            "load_theia_c3d(path, extract_force_platforms=True)."
+        )
+
+    platforms = c3d_obj["data"]["platform"]
+    if not platforms:
+        raise WorkflowValidationError("C3D reports zero force platforms (FORCE_PLATFORM:USED = 0).")
+
+    if gcs_to_opensim_R is None:
+        gcs_to_opensim_R = build_gcs_to_opensim_rotation(DEFAULT_GCS_ROTATIONS)
+
+    analog_rate = float(np.asarray(c3d_obj["parameters"]["ANALOG"]["RATE"]["value"]).squeeze())
+
+    data: Dict[str, np.ndarray] = {}
+    time_col: np.ndarray | None = None
+
+    for plate_idx, platform in enumerate(platforms, start=1):
+        force = np.asarray(platform["force"], dtype=float)  # (3, nsamples)
+        # OpenSim's ground_torque columns are the *free moment* -- the torque
+        # left over once the force is already resolved to act at the center
+        # of pressure (mostly vertical: shoe/foot twisting friction) -- not
+        # platform["moment"], which is the raw moment about the plate's own
+        # origin and already bakes in the force x COP-to-origin moment arm.
+        # Feeding that raw moment into ground_torque would double-count that
+        # arm on top of applying the force at ground_force_p*.
+        free_moment = np.asarray(platform["Tz"], dtype=float)
+        cop = np.asarray(platform["center_of_pressure"], dtype=float)
+        nsamples = force.shape[1]
+
+        if time_col is None:
+            time_col = np.arange(nsamples) / analog_rate
+        elif len(time_col) != nsamples:
+            raise WorkflowValidationError(
+                f"Force platform {plate_idx} has {nsamples} samples, "
+                f"expected {len(time_col)} (platforms must share a time base)."
+            )
+
+        pos_scale = _grf_unit_scale(platform["unit_position"], _GRF_LENGTH_TO_M, "position")
+        force_scale = _grf_unit_scale(platform["unit_force"], _GRF_FORCE_TO_N, "force")
+        moment_scale = _grf_unit_scale(platform["unit_moment"], _GRF_MOMENT_TO_NM, "moment")
+
+        # Rotate into the OpenSim ground frame. Force and moment are free
+        # vectors (no translation); COP is a position, but -- like the
+        # marker-origin rotations in extract_virtual_marker_positions -- only
+        # a coordinate-system rotation is needed here, not a translation, since
+        # the platform's own coordinate origin already coincides with the
+        # source lab origin (FORCE_PLATFORM:ORIGIN is relative to that, and is
+        # not folded in here).
+        force_os = gcs_to_opensim_R @ (force * force_scale)
+        moment_os = gcs_to_opensim_R @ (free_moment * moment_scale)
+        cop_os = gcs_to_opensim_R @ (cop * pos_scale)
+
+        # Vertical force in the *source* frame determines contact, before
+        # rotation -- Fz there is well-defined regardless of --gcs-rot.
+        loaded = (force[2, :] * force_scale) >= force_threshold
+        force_os[:, ~loaded] = 0.0
+        moment_os[:, ~loaded] = 0.0
+        cop_os[:, ~loaded] = 0.0
+
+        prefix = f"{plate_idx}_ground"
+        data[f"{prefix}_force_vx"] = force_os[0, :]
+        data[f"{prefix}_force_vy"] = force_os[1, :]
+        data[f"{prefix}_force_vz"] = force_os[2, :]
+        data[f"{prefix}_force_px"] = cop_os[0, :]
+        data[f"{prefix}_force_py"] = cop_os[1, :]
+        data[f"{prefix}_force_pz"] = cop_os[2, :]
+        data[f"{prefix}_torque_x"] = moment_os[0, :]
+        data[f"{prefix}_torque_y"] = moment_os[1, :]
+        data[f"{prefix}_torque_z"] = moment_os[2, :]
+
+    return pd.DataFrame({"time": time_col, **data})
+
+
+def align_ik_and_grf_dataframes(
+    ik_df: pd.DataFrame,
+    ik_c3d_obj: Dict,
+    grf_df: pd.DataFrame,
+    grf_c3d_obj: Dict,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Trim ik_df (from build_mot_dataframe) and grf_df (from build_grf_dataframe)
+    down to the span of frames their source C3D files actually share on the
+    original recording's frame clock, then rebase both time axes to start at 0.
+
+    Standalone from the two build_*_dataframe functions -- this exists because
+    the IK and GRF sources are often two independent C3D exports of the same
+    trial (e.g. a markerless kinematics export re-numbered from its own frame
+    1, alongside a marker+force export trimmed to a different window of the
+    same session), so their durations and "time=0" points don't correspond to
+    the same real-world instant. Guessing an offset from the signals
+    themselves (e.g. cross-correlating a gait event) is fragile when both
+    signals are periodic; get_actual_frame_range instead reads each source's
+    TRIAL:ACTUAL_START_FIELD / ACTUAL_END_FIELD, which the capture software
+    stamps with each export's true position in the shared, un-cropped
+    recording -- intersecting those two ranges gives the real overlap
+    directly, with no guessing.
+
+    Raises WorkflowValidationError if the two sources have different POINT
+    frame rates (their frame numbers wouldn't be comparable) or if their
+    frame ranges don't overlap at all (they are not exports of the same
+    recording).
+    """
+    ik_rate, _ = get_frame_rate_and_count(ik_c3d_obj)
+    grf_point_rate, _ = get_frame_rate_and_count(grf_c3d_obj)
+    if not np.isclose(ik_rate, grf_point_rate):
+        raise WorkflowValidationError(
+            f"IK and GRF sources have different POINT frame rates "
+            f"({ik_rate:g} Hz vs {grf_point_rate:g} Hz) -- their "
+            "ACTUAL_START_FIELD/ACTUAL_END_FIELD frame numbers are not "
+            "directly comparable."
+        )
+
+    ik_start, ik_end = get_actual_frame_range(ik_c3d_obj)
+    grf_start, grf_end = get_actual_frame_range(grf_c3d_obj)
+
+    overlap_start = max(ik_start, grf_start)
+    overlap_end = min(ik_end, grf_end)
+    if overlap_start > overlap_end:
+        raise WorkflowValidationError(
+            f"No overlapping frames between the IK source (master frames "
+            f"{ik_start}-{ik_end}) and the GRF source (master frames "
+            f"{grf_start}-{grf_end}) -- these do not appear to be exports of "
+            "the same recording."
+        )
+    num_frames = overlap_end - overlap_start + 1
+
+    # Index-based slicing rather than comparing float "time" columns against
+    # a computed boundary: GRF is analog-rate data, oversampled some integer
+    # factor R above the POINT rate used for the frame numbers above, and a
+    # frame-boundary time (e.g. overlap_end/point_rate) marks only the START
+    # of that frame's own R analog samples -- comparing against it as an
+    # upper bound would drop that frame's later samples. Deriving R from the
+    # GRF source's own row count sidesteps that without needing the analog
+    # rate passed in separately.
+    ik_offset = overlap_start - ik_start
+    ik_aligned = ik_df.iloc[ik_offset: ik_offset + num_frames].copy()
+    ik_aligned["time"] = np.round(ik_aligned["time"].to_numpy() - ik_aligned["time"].iloc[0], 6)
+
+    grf_total_frames = grf_end - grf_start + 1
+    grf_samples_per_frame = len(grf_df) / grf_total_frames
+    grf_offset = round((overlap_start - grf_start) * grf_samples_per_frame)
+    grf_count = round(num_frames * grf_samples_per_frame)
+    grf_aligned = grf_df.iloc[grf_offset: grf_offset + grf_count].copy()
+    grf_aligned["time"] = np.round(grf_aligned["time"].to_numpy() - grf_aligned["time"].iloc[0], 6)
+
+    return ik_aligned.reset_index(drop=True), grf_aligned.reset_index(drop=True)
+
+
+def detect_grf_plate_feet(
+    grf_df: pd.DataFrame,
+    r_foot_pos: np.ndarray,
+    l_foot_pos: np.ndarray,
+    foot_pos_rate: float,
+) -> Dict[int, Optional[str]]:
+    """
+    Guess which foot ("r" or "l") stood on each force plate present in
+    grf_df's columns, for building an ExternalLoads setup (see
+    opensim_scaling.write_external_loads_xml).
+
+    For each plate, at its peak vertical-force instant (the most solid,
+    least noisy moment of ground contact), this compares the plate's
+    center-of-pressure position against both feet's segment-origin positions
+    (from get_segment_positions_opensim, sampled at the same aligned time as
+    grf_df -- see align_ik_and_grf_dataframes) and assigns whichever foot is
+    horizontally closer.
+
+    This is a heuristic based on physical proximity, not ground truth -- it
+    can be wrong for closely-spaced steps, cross-over gait, or a plate that
+    two feet both contact in the same trial. Treat it as a starting default
+    to sanity-check, not something to trust blindly.
+
+    Returns {plate_index: "r" | "l" | None}; None means that plate's
+    vertical force never exceeded the zeroing threshold anywhere in this
+    trial (see build_grf_dataframe's force_threshold), so no contact instant
+    exists to assign from.
+    """
+    plate_indices = sorted(
+        int(match.group(1))
+        for column in grf_df.columns
+        for match in [re.match(r"^(\d+)_ground_force_vy$", column)]
+        if match
+    )
+    n_foot_frames = r_foot_pos.shape[1]
+
+    assignment: Dict[int, Optional[str]] = {}
+    for plate_idx in plate_indices:
+        vy = grf_df[f"{plate_idx}_ground_force_vy"].to_numpy()
+        if not np.any(vy != 0.0):
+            assignment[plate_idx] = None
+            continue
+
+        peak_row = int(np.argmax(vy))
+        peak_time = float(grf_df["time"].iloc[peak_row])
+        cop = np.array([
+            grf_df[f"{plate_idx}_ground_force_px"].iloc[peak_row],
+            grf_df[f"{plate_idx}_ground_force_pz"].iloc[peak_row],
+        ])
+
+        foot_idx = int(np.clip(round(peak_time * foot_pos_rate), 0, n_foot_frames - 1))
+        # Horizontal (ground-plane, x/z) distance only -- foot height during
+        # stance and COP's own (near-zero) vertical component don't help
+        # distinguish which foot.
+        r_dist = np.linalg.norm(cop - r_foot_pos[[0, 2], foot_idx])
+        l_dist = np.linalg.norm(cop - l_foot_pos[[0, 2], foot_idx])
+        assignment[plate_idx] = "r" if r_dist < l_dist else "l"
+
+    return assignment
 
 
 def validate_mot_dataframe(df: pd.DataFrame) -> List[str]:
@@ -672,8 +991,11 @@ def write_static_trc_from_c3d(
     )
 
 
-def write_mot(df: pd.DataFrame, output_path: str | Path) -> Path:
+def write_mot(df: pd.DataFrame, output_path: str | Path, in_degrees: bool = True) -> Path:
     # Write the OpenSim .mot header followed by a tab-delimited table.
+    # in_degrees=False for non-angular tables (e.g. build_grf_dataframe's
+    # forces/moments/positions) -- inDegrees only describes rotational
+    # columns, but leaving it "yes" on a file with none is misleading.
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -686,7 +1008,7 @@ def write_mot(df: pd.DataFrame, output_path: str | Path) -> Path:
         f"datacolumns {df.shape[1]}",
         f"datarows {df.shape[0]}",
         f"range {start_time:.5f} {end_time:.5f}",
-        "inDegrees=yes",
+        f"inDegrees={'yes' if in_degrees else 'no'}",
         "endheader",
     ]
 

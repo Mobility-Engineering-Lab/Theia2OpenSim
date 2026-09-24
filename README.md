@@ -211,6 +211,13 @@ Trim leading/trailing zero regions:
 python src/Python/run_pipeline.py --trim-zeros --subject-mass 70.0
 ```
 
+Skip HEAD-based torso scaling for a subject/trial where `head_4X4` isn't trustworthy
+(see [`--no-head`](#run_pipelinepy-flags) below):
+
+```bash
+python src/Python/run_pipeline.py --no-head --subject-mass 70.0
+```
+
 ## Source GCS -> OpenSim GCS Rotation
 
 `--gcs-rot` specifies the ordered axis-angle rotations that transform the source
@@ -242,6 +249,7 @@ one frame.
 | `--output-trc`           | `sample_data/OpenSim_output/Orientation_test_output/Static_rot_test_correct.trc` | Output static`.trc` path.                                                         |
 | `--repeat-static-frames` | `6`                                            | Number of repeated frames written to static`.trc`.                                |
 | `--no-scale`             | off                                              | Skip OpenSim Scale Tool run.                                                        |
+| `--no-head`              | off                                              | Drop the HEAD marker and torso scaling. Use when `head_4X4` isn't trustworthy for a subject/trial -- some Theia captures report it as a constant identity transform (never actually tracked) rather than NaN, which passes the required-label check silently but corrupts the torso scale factor and, since MarkerPlacer solves all markers jointly, distorts nearby joint placement too. Symptom: a torso scale factor far from 1.0 and/or the largest marker error reported at HEAD. |
 | `--scale-model`          | `sample_data/gait2392_simbody.osim`            | Generic model used as Scale Tool input.                                             |
 | `--marker-set`           | `sample_data/markerstheia.xml`                 | MarkerSet XML matching virtual marker names.                                        |
 | `--output-osim`          | `sample_data/OpenSim_output/Orientation_test_output/scaled_model_rot_test_correct.osim` | Output scaled`.osim` path.                                                        |

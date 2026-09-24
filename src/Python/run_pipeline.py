@@ -7,12 +7,15 @@ from pathlib import Path
 
 from opensim_scaling import run_scale_tool
 from workflow_utils import (
+    DEFAULT_TRC_MARKER_SEGMENT_MAP,
     REQUIRED_ROTATION_LABELS,
     DEFAULT_GCS_ROTATIONS,
     build_gcs_to_opensim_rotation,
+    build_grf_dataframe,
     parse_axis_angle_rotations,
     build_mot_dataframe,
     find_missing_labels,
+    get_force_platform_count,
     get_frame_rate_and_count,
     get_rotation_labels,
     load_theia_c3d,
@@ -30,13 +33,21 @@ def parse_args() -> argparse.Namespace:
     #       OR leave them as-is and pass paths on the command line instead
     #       (e.g. --c3d "C:/MyData/trial01.c3d").
     # -------------------------------------------------------------------------
-    default_c3d         = Path(__file__).resolve().parents[2] / "sample_data" /"Orientation_test"/"Hopping_FL_filt.c3d"
-    default_out         = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Orientation_test_output"/"Hopping_FL_filt_rot_test.mot"
-    default_static_c3d  = Path(__file__).resolve().parents[2] / "sample_data" / "c3d_trials"/"Static.c3d"
-    default_static_trc  = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Orientation_test_output"/"Static_rot_test.trc"
+    default_c3d         = Path(__file__).resolve().parents[2] / "sample_data" /"c3d_trials"/"JoggingL1_filt_ID.c3d"
+    default_out         = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" /"JoggingL1_filt_ID.mot"
+    default_static_c3d  = Path(__file__).resolve().parents[2] / "sample_data" / "c3d_trials"/"Static_filt_ID.c3d"
+    default_static_trc  = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" /"Static_ID_test.trc"
     default_scale_model = Path(__file__).resolve().parents[2] / "sample_data" / "gait2392_simbody.osim"
     default_marker_set  = Path(__file__).resolve().parents[2] / "sample_data" / "markerstheia.xml"
-    default_output_osim = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Orientation_test_output"/"scaled_model_rot_test.osim"
+    default_output_osim = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" /"scaled_model_ID_test.osim"
+    # USER: this is deliberately a *different* file from default_c3d above --
+    #       force-plate (analog) data should generally not go through the same
+    #       low-pass filtering used for marker/rotation kinematics, so labs
+    #       often export an unfiltered C3D for force alongside a filtered one
+    #       for kinematics. Point this at whichever C3D actually has your
+    #       FORCE_PLATFORM data.
+    default_grf_c3d      = Path(__file__).resolve().parents[2] / "sample_data" / "c3d_trials"/"JoggingL1_ID.c3d"
+    default_output_grf_mot = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" /"JoggingL1_ID_grf.mot"
 
     parser = argparse.ArgumentParser(description="Convert Theia3D C3D data into an OpenSim MOT file.")
     parser.add_argument("--c3d", type=Path, default=default_c3d,
@@ -67,6 +78,15 @@ def parse_args() -> argparse.Namespace:
                         help="Skip running OpenSim's Scale Tool. By default, the Scale Tool runs "
                              "automatically (via the OpenSim Python API) whenever a static source is "
                              "given (--static-c3d or --static-frames); pass this to opt out.")
+    parser.add_argument("--no-head", action="store_true",
+        # USER: pass this when head_4X4 isn't trustworthy for this subject/trial
+        #       (check: some Theia captures report a constant identity transform for
+        #       head_4X4 instead of NaN, i.e. it looks present but was never tracked --
+        #       this corrupts torso scaling and, because MarkerPlacer solves all markers
+        #       jointly, distorts nearby joint placement too. Symptom: a torso scale
+        #       factor far from 1.0 and/or the largest marker error reported at HEAD.)
+                        help="Drop the HEAD marker and torso scaling, reproducing scaling as it "
+                             "behaved before HEAD-based torso scaling was added.")
     parser.add_argument("--scale-model", type=Path, default=default_scale_model,
                         help="Generic (unscaled) .osim model file to scale.")
     parser.add_argument("--marker-set", type=Path, default=default_marker_set,
@@ -83,6 +103,20 @@ def parse_args() -> argparse.Namespace:
         help=("Ordered axis-angle rotations transforming the source laboratory "
               "GCS into the OpenSim GCS. " 'Example: --gcs-rot Z:-90 X:-90. '
               "Up to three rotations may be specified."),)
+    parser.add_argument("--grf-c3d", type=Path, default=default_grf_c3d,
+                        help="Theia3D C3D file containing force-platform data, for ground-reaction-force "
+                             "export. Independent of --c3d (see the USER note on default_grf_c3d above); "
+                             "runs automatically whenever it resolves to a file that exists and reports "
+                             "FORCE_PLATFORM data. Pass --no-grf to skip.")
+    parser.add_argument("--output-grf-mot", type=Path, default=default_output_grf_mot,
+                        help="Output ground-reaction-force .mot file path.")
+    parser.add_argument("--no-grf", action="store_true",
+                        help="Skip ground-reaction-force export even if --grf-c3d resolves.")
+    parser.add_argument("--grf-force-threshold", type=float, default=20.0,
+                        help="Vertical force (N) below which a force-platform sample is treated as "
+                             "unloaded and zeroed (force, moment, torque, and center of pressure). "
+                             "Needed because center of pressure is undefined at zero force and noisy "
+                             "near it -- see build_grf_dataframe's docstring.")
     return parser.parse_args()
 
 
@@ -175,11 +209,21 @@ def main() -> int:
     if want_static:
         frame_indices = parse_frame_indices(static_frames_spec)
 
+        # --no-head drops the HEAD marker from the TRC to match the
+        # HEAD-less ScaleTool config built below (opensim_scaling.build_scale_tool's
+        # include_head=False) -- both sides need to agree, or the Scale Tool
+        # setup XML would reference a marker the TRC doesn't have.
+        marker_segment_map = (
+            {name: label for name, label in DEFAULT_TRC_MARKER_SEGMENT_MAP.items() if name != "HEAD"}
+            if args.no_head else None
+        )
+
         trc_path = write_static_trc_from_c3d(
             c3d_obj=static_c3d_obj,
             output_path=args.output_trc,
             frame_indices=frame_indices,
             repeat_frames=args.repeat_static_frames,
+            marker_segment_map=marker_segment_map,
             gcs_to_opensim_R=gcs_to_opensim_R,
         )
 
@@ -187,6 +231,8 @@ def main() -> int:
         print(f"- Static source: {static_source_label}")
         print(f"- Static frames used: {static_frames_spec}")
         print(f"- Repeated TRC frames: {args.repeat_static_frames}")
+        if args.no_head:
+            print("- HEAD marker / torso scaling: disabled (--no-head)")
         print("")
 
     # -------------------------------------------------------------------
@@ -214,6 +260,7 @@ def main() -> int:
             time_range=time_range,
             mass=args.subject_mass,
             setup_xml_path=setup_xml_path,
+            include_head=not args.no_head,
         )
 
         if result.success:
@@ -245,6 +292,36 @@ def main() -> int:
     print(f"[PASS] Wrote OpenSim MOT file: {out_path}")
     print(f"- Rows: {df.shape[0]}")
     print(f"- Columns: {df.shape[1]}")
+    print("")
+
+    # -------------------------------------------------------------------
+    # Step 5: Optional ground-reaction-force export, for Inverse Dynamics.
+    # Standalone from Step 4 above (own C3D source, own native analog-rate
+    # time base -- see build_grf_dataframe) but reuses the same
+    # gcs_to_opensim_R, so both outputs describe one consistent OpenSim
+    # ground frame. Missing file / no force-platform data is a [SKIP], not a
+    # hard failure, since GRF is an add-on to the kinematics export above.
+    # -------------------------------------------------------------------
+    if not args.no_grf:
+        if not args.grf_c3d.exists():
+            print(f"[SKIP] GRF export: file not found: {args.grf_c3d}")
+        else:
+            grf_c3d_obj = load_theia_c3d(args.grf_c3d, extract_force_platforms=True)
+            if get_force_platform_count(grf_c3d_obj) == 0:
+                print(f"[SKIP] GRF export: no FORCE_PLATFORM data in {args.grf_c3d}")
+            else:
+                grf_df = build_grf_dataframe(
+                    grf_c3d_obj,
+                    gcs_to_opensim_R=gcs_to_opensim_R,
+                    force_threshold=args.grf_force_threshold,
+                )
+                grf_path = write_mot(grf_df, args.output_grf_mot, in_degrees=False)
+                print(f"[PASS] Wrote OpenSim GRF MOT file: {grf_path}")
+                print(f"- GRF source: {args.grf_c3d}")
+                print(f"- Rows: {grf_df.shape[0]}")
+                print(f"- Columns: {grf_df.shape[1]}")
+                print(f"- Force threshold: {args.grf_force_threshold:g} N")
+
     return 0
 
 

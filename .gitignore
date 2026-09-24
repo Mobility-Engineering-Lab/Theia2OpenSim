@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 sample_data/OpenSim/TestData
 notes/
+DEV_NOTES.md
+Theia2OpenSim.code-workspace
