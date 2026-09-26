@@ -30,13 +30,13 @@ def parse_args() -> argparse.Namespace:
     #       OR leave them as-is and pass paths on the command line instead
     #       (e.g. --c3d "C:/MyData/trial01.c3d").
     # -------------------------------------------------------------------------
-    default_c3d         = Path(__file__).resolve().parents[2] / "sample_data" /"Orientation_test"/"Hopping_FL_filt.c3d"
-    default_out         = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Orientation_test_output"/"Hopping_FL_filt_rot_test.mot"
+    default_c3d         = Path(__file__).resolve().parents[2] / "sample_data" /"c3d_trials"/"Jogging_1.c3d"
+    default_out         = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Jogging_1.mot"
     default_static_c3d  = Path(__file__).resolve().parents[2] / "sample_data" / "c3d_trials"/"Static.c3d"
-    default_static_trc  = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Orientation_test_output"/"Static_rot_test.trc"
+    default_static_trc  = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output"/"Static.trc"
     default_scale_model = Path(__file__).resolve().parents[2] / "sample_data" / "gait2392_simbody.osim"
     default_marker_set  = Path(__file__).resolve().parents[2] / "sample_data" / "markerstheia.xml"
-    default_output_osim = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "Orientation_test_output"/"scaled_model_rot_test.osim"
+    default_output_osim = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output"/"scaled_model.osim"
 
     parser = argparse.ArgumentParser(description="Convert Theia3D C3D data into an OpenSim MOT file.")
     parser.add_argument("--c3d", type=Path, default=default_c3d,

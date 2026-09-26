@@ -30,20 +30,20 @@ Theia2OpenSim/
 │   ├── markerstheia.xml
 │   ├── Scaling_Setup.xml
 │   ├── c3d_trials/
-│   │   ├── LJogging.c3d
-│   │   ├── LSLDJ.c3d
-│   │   ├── LWalking1_filt.c3d
-│   │   ├── RJogging.c3d
-│   │   ├── RSLDJ.c3d
-│   │   ├── RWalking1_filt.c3d
+│   │   ├── Jogging_1.c3d
+│   │   ├── SLDJ_1.c3d
+│   │   ├── Walking_1.c3d
+│   │   ├── Jogging_2.c3d
+│   │   ├── SLDJ_2.c3d
+│   │   ├── Walking_2.c3d
 │   │   └── Static.c3d
 │   ├── Orientation_test/
-│   │   ├── Hopping_BL_filt.c3d
-│   │   ├── Hopping_BR_filt.c3d
-│   │   ├── Hopping_FL_filt.c3d
-│   │   ├── Squat_BL_filt.c3d
-│   │   ├── Squat_BR_filt.c3d
-│   │   └── Squat_FL_filt.c3d
+│   │   ├── Hopping_BL.c3d
+│   │   ├── Hopping_BR.c3d
+│   │   ├── Hopping_FL.c3d
+│   │   ├── Squat_BL.c3d
+│   │   ├── Squat_BR.c3d
+│   │   └── Squat_FL.c3d
 │   └── OpenSim_output/
 └── src/
     ├── Matlab/
@@ -113,7 +113,7 @@ package crash on import together.
 
 `validate_workflow.py` defaults to:
 
-- `sample_data/c3d_trials/LWalking1_filt.c3d`
+- `sample_data/c3d_trials/Walking_1.c3d`
 
 Run with default input:
 
@@ -124,7 +124,7 @@ python src/Python/validate_workflow.py
 Or pass a specific trial explicitly:
 
 ```bash
-python src/Python/validate_workflow.py --c3d sample_data/c3d_trials/LWalking1_filt.c3d
+python src/Python/validate_workflow.py --c3d sample_data/c3d_trials/Walking_1.c3d
 ```
 
 Expected output:
@@ -145,13 +145,13 @@ python src/Python/run_pipeline.py --subject-mass 70.0
 
 Current default paths in `run_pipeline.py`:
 
-- `--c3d`: `sample_data/Orientation_test/Hopping_BR_filt.c3d`
-- `--output-mot`: `sample_data/OpenSim_output/Orientation_test_output/Hopping_BR_filt_rot_test_correct.mot`
+- `--c3d`: `sample_data/Orientation_test/Hopping_BR.c3d`
+- `--output-mot`: `sample_data/OpenSim_output/Orientation_test_output/Hopping_BR.mot`
 - `--static-c3d`: `sample_data/c3d_trials/Static.c3d`
-- `--output-trc`: `sample_data/OpenSim_output/Orientation_test_output/Static_rot_test_correct.trc`
+- `--output-trc`: `sample_data/OpenSim_output/Orientation_test_output/Static.trc`
 - `--scale-model`: `sample_data/gait2392_simbody.osim`
 - `--marker-set`: `sample_data/markerstheia.xml`
-- `--output-osim`: `sample_data/OpenSim_output/Orientation_test_output/scaled_model_rot_test_correct.osim`
+- `--output-osim`: `sample_data/OpenSim_output/Orientation_test_output/scaled_model.osim`
 - `--gcs-rot`: `Z:-90 X:-90` (see [Source GCS -> OpenSim GCS Rotation](#source-gcs---opensim-gcs-rotation))
 
 When static input is provided, scaling runs by default unless `--no-scale` is set.
@@ -162,8 +162,8 @@ Dynamic `.mot` only:
 
 ```bash
 python src/Python/run_pipeline.py \
-  --c3d sample_data/c3d_trials/LWalking1_filt.c3d \
-  --output-mot sample_data/OpenSim_output/LWalking1_filt.mot \
+  --c3d sample_data/c3d_trials/Walking_1.c3d \
+  --output-mot sample_data/OpenSim_output/Walking_1.mot \
   --no-static-c3d \
   --subject-mass 70.0
 ```
@@ -174,8 +174,8 @@ the defaults-only form above also does, since `--static-c3d` defaults to
 
 ```bash
 python src/Python/run_pipeline.py \
-  --c3d sample_data/c3d_trials/LWalking1_filt.c3d \
-  --output-mot sample_data/OpenSim_output/LWalking1_filt.mot \
+  --c3d sample_data/c3d_trials/Walking_1.c3d \
+  --output-mot sample_data/OpenSim_output/Walking_1.mot \
   --static-c3d sample_data/c3d_trials/Static.c3d \
   --output-trc sample_data/OpenSim_output/Static.trc \
   --output-osim sample_data/OpenSim_output/scaled_model.osim \
@@ -186,7 +186,7 @@ Skip scaling, keep `.mot` + `.trc`:
 
 ```bash
 python src/Python/run_pipeline.py \
-  --c3d sample_data/c3d_trials/LWalking1_filt.c3d \
+  --c3d sample_data/c3d_trials/Walking_1.c3d \
   --static-c3d sample_data/c3d_trials/Static.c3d \
   --output-trc sample_data/OpenSim_output/Static.trc \
   --no-scale \
@@ -197,8 +197,8 @@ Use dynamic-trial frames as static source:
 
 ```bash
 python src/Python/run_pipeline.py \
-  --c3d sample_data/c3d_trials/LWalking1_filt.c3d \
-  --output-mot sample_data/OpenSim_output/LWalking1_filt.mot \
+  --c3d sample_data/c3d_trials/Walking_1.c3d \
+  --output-mot sample_data/OpenSim_output/Walking_1.mot \
   --no-static-c3d \
   --static-frames 290:310 \
   --output-trc sample_data/OpenSim_output/Static.trc \
@@ -233,18 +233,18 @@ one frame.
 
 | Flag                       | Default                                          | Purpose                                                                             |
 | -------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------- |
-| `--c3d`                  | `sample_data/Orientation_test/Hopping_BR_filt.c3d` | Dynamic trial C3D to convert.                                                       |
-| `--output-mot`           | `sample_data/OpenSim_output/Orientation_test_output/Hopping_BR_filt_rot_test_correct.mot` | Output dynamic`.mot` path.                                                        |
+| `--c3d`                  | `sample_data/Orientation_test/Hopping_BR.c3d` | Dynamic trial C3D to convert.                                                       |
+| `--output-mot`           | `sample_data/OpenSim_output/Orientation_test_output/Hopping_BR.mot` | Output dynamic`.mot` path.                                                        |
 | `--trim-zeros`           | off                                              | Trim leading/trailing all-zero regions per signal and rebase time.                  |
 | `--static-c3d`           | `sample_data/c3d_trials/Static.c3d`            | Dedicated static C3D used for TRC generation and scaling.                           |
 | `--no-static-c3d`        | off                                              | Ignore`--static-c3d` and use dynamic-trial static frames or `.mot`-only flow.   |
 | `--static-frames`        | `None` (runtime fallback uses `"300"`)       | Frame spec for static pose (`"300"`, `"290:310"`, `"290,300,310"`).           |
-| `--output-trc`           | `sample_data/OpenSim_output/Orientation_test_output/Static_rot_test_correct.trc` | Output static`.trc` path.                                                         |
+| `--output-trc`           | `sample_data/OpenSim_output/Orientation_test_output/Static.trc` | Output static`.trc` path.                                                         |
 | `--repeat-static-frames` | `6`                                            | Number of repeated frames written to static`.trc`.                                |
 | `--no-scale`             | off                                              | Skip OpenSim Scale Tool run.                                                        |
 | `--scale-model`          | `sample_data/gait2392_simbody.osim`            | Generic model used as Scale Tool input.                                             |
 | `--marker-set`           | `sample_data/markerstheia.xml`                 | MarkerSet XML matching virtual marker names.                                        |
-| `--output-osim`          | `sample_data/OpenSim_output/Orientation_test_output/scaled_model_rot_test_correct.osim` | Output scaled`.osim` path.                                                        |
+| `--output-osim`          | `sample_data/OpenSim_output/Orientation_test_output/scaled_model.osim` | Output scaled`.osim` path.                                                        |
 | `--subject-mass`         | *(required)*                                   | Subject mass (kg). Sets the scaled model's total mass; always required, whether or not scaling runs, since downstream inverse dynamics depends on it. |
 | `--gcs-rot`              | `Z:-90 X:-90`                                  | Ordered `AXIS:DEG` rotations, source lab GCS -> OpenSim GCS (see [above](#source-gcs---opensim-gcs-rotation)). Up to three. |
 
