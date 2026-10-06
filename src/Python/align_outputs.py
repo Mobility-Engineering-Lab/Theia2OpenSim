@@ -51,7 +51,7 @@ from workflow_utils import (
 FOOT_BODY_NAMES = {"r": "calcn_r", "l": "calcn_l"}
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     default_ik_c3d = Path(__file__).resolve().parents[2] / "sample_data" / "c3d_trials" / "JoggingL1_filt_ID.c3d"
     default_grf_c3d = Path(__file__).resolve().parents[2] / "sample_data" / "c3d_trials" / "JoggingL1_ID.c3d"
     default_ik_out = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "JoggingL1_filt_ID_aligned.mot"
@@ -63,25 +63,38 @@ def parse_args() -> argparse.Namespace:
     default_id_setup_out = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" / "JoggingL1_ID_inverse_dynamics_setup.xml"
 
     parser = argparse.ArgumentParser(description="Align an IK and a GRF C3D export to their shared time window.")
-    parser.add_argument("--ik-c3d", type=Path, default=default_ik_c3d,
-                        help="Theia3D C3D file with kinematic (rotation) data.")
-    parser.add_argument("--grf-c3d", type=Path, default=default_grf_c3d,
-                        help="C3D file with FORCE_PLATFORM data.")
-    parser.add_argument("--output-ik-mot", type=Path, default=default_ik_out,
-                        help="Output path for the aligned IK .mot file.")
-    parser.add_argument("--output-grf-mot", type=Path, default=default_grf_out,
-                        help="Output path for the aligned GRF .mot file.")
-    parser.add_argument("--gcs-rot", nargs="*", default=None, metavar="AXIS:DEG",
+
+    # Each argument group is also one box in run_pipeline_gui.py's second tab,
+    # with its inputs and outputs (dest starting "output_") side by side.
+    coords = parser.add_argument_group("Coordinate system")
+    coords.add_argument("--gcs-rot", nargs="*", default=None, metavar="AXIS:DEG",
                         help=("Ordered axis-angle rotations transforming the source laboratory "
                               "GCS into the OpenSim GCS. Example: --gcs-rot Z:-90 X:-90. "
-                              "Must match whatever run_pipeline.py used for these same sources."))
-    parser.add_argument("--grf-force-threshold", type=float, default=20.0,
+                              "Must match whatever run_pipeline.py used for these same sources. "
+                              "Omit the flag for the default (Z:-90 X:-90); pass it with no "
+                              "values for no rotation."))
+
+    kinematics = parser.add_argument_group("Kinematics (IK)")
+    kinematics.add_argument("--ik-c3d", type=Path, default=default_ik_c3d,
+                            help="Theia3D C3D file with kinematic (rotation) data.")
+    kinematics.add_argument("--output-ik-mot", type=Path, default=default_ik_out,
+                            help="Output path for the aligned IK .mot file.")
+
+    forces = parser.add_argument_group("Ground reaction forces")
+    forces.add_argument("--grf-c3d", type=Path, default=default_grf_c3d,
+                        help="C3D file with FORCE_PLATFORM data.")
+    forces.add_argument("--grf-force-threshold", type=float, default=20.0,
                         help="Vertical force (N) below which a force-platform sample is zeroed.")
-    parser.add_argument("--output-external-loads", type=Path, default=default_ext_loads_out,
-                        help="Output path for the generated ExternalLoads settings XML.")
-    parser.add_argument("--no-external-loads", action="store_true",
-                        help="Skip generating the ExternalLoads XML (aligned .mot files are still written).")
-    parser.add_argument("--plate-foot", nargs="*", default=None, metavar="N:L|R",
+    forces.add_argument("--output-grf-mot", type=Path, default=default_grf_out,
+                        help="Output path for the aligned GRF .mot file.")
+
+    loads = parser.add_argument_group("External loads")
+    loads.add_argument("--output-external-loads", type=Path, default=default_ext_loads_out,
+                       help="Output path for the generated ExternalLoads settings XML.")
+    loads.add_argument("--no-external-loads", action="store_true",
+                       help="Skip generating the ExternalLoads XML, and with it the Inverse Dynamics "
+                            "setup XML that references it (aligned .mot files are still written).")
+    loads.add_argument("--plate-foot", nargs="*", default=None, metavar="N:L|R",
         # USER: override when the auto-detected foot is wrong for a plate --
         #       it's a proximity heuristic (nearest foot to the plate's
         #       peak-force center of pressure), not ground truth. Also use
@@ -90,14 +103,19 @@ def parse_args() -> argparse.Namespace:
                         help=("Force a plate's foot assignment instead of auto-detecting it, e.g. "
                               "--plate-foot 1:R 2:L. Overrides auto-detection only for the plate "
                               "numbers listed; other plates are still auto-detected."))
-    parser.add_argument("--scaled-model", type=Path, default=default_scaled_model,
-                        help="Scaled .osim model file (produced by run_pipeline.py) to reference "
-                             "in the generated InverseDynamicsTool settings XML.")
-    parser.add_argument("--output-id-setup", type=Path, default=default_id_setup_out,
-                        help="Output path for the generated InverseDynamicsTool settings XML.")
-    parser.add_argument("--no-id-setup", action="store_true",
-                        help="Skip generating the InverseDynamicsTool settings XML.")
-    return parser.parse_args()
+    id_setup = parser.add_argument_group("Inverse dynamics setup")
+    id_setup.add_argument("--scaled-model", type=Path, default=default_scaled_model,
+                          help="Scaled .osim model file (produced by run_pipeline.py) to reference "
+                               "in the generated InverseDynamicsTool settings XML.")
+    id_setup.add_argument("--output-id-setup", type=Path, default=default_id_setup_out,
+                          help="Output path for the generated InverseDynamicsTool settings XML.")
+    id_setup.add_argument("--no-id-setup", action="store_true",
+                          help="Skip generating the InverseDynamicsTool settings XML.")
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def main() -> int:
@@ -173,10 +191,18 @@ def main() -> int:
         assignment = detect_grf_plate_feet(grf_aligned, r_foot_pos, l_foot_pos, foot_pos_rate=ik_rate)
 
         overrides: dict[int, str] = {}
-        if args.plate_foot:
-            for spec in args.plate_foot:
-                idx_str, _, foot_str = spec.partition(":")
-                overrides[int(idx_str)] = foot_str.strip().lower()[0]
+        for spec in args.plate_foot or []:
+            idx_str, _, foot_str = spec.partition(":")
+            foot = foot_str.strip().lower()[:1]
+            if not idx_str.strip().isdigit() or foot not in FOOT_BODY_NAMES:
+                print(f"[FAIL] Invalid --plate-foot '{spec}' (expected N:L or N:R, e.g. 1:R).")
+                return 1
+            overrides[int(idx_str)] = foot
+        unknown = sorted(set(overrides) - set(assignment))
+        if unknown:
+            print(f"[FAIL] --plate-foot names plate(s) {unknown}, but {args.grf_c3d.name} only has "
+                  f"plate(s) {sorted(assignment)}.")
+            return 1
         assignment.update(overrides)
 
         plate_body_names: dict[int, str] = {}

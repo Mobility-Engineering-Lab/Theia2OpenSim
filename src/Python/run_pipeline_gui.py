@@ -1,12 +1,12 @@
-"""Tkinter front end for run_pipeline.py.
+"""Tkinter front end for run_pipeline.py and align_outputs.py, one tab each.
 
-The form is generated from run_pipeline.build_parser(), so any flag added to
-the CLI shows up here automatically with its default and help text (hover a
-field to see it). Layout follows the parser's argument groups: every
-checkbox is collected into one Options box, and each group becomes its own
-box with input fields and output fields (dest starting "output_") side by
-side. The pipeline runs as a subprocess rather than in-process, so a native
-crash in OpenSim/ezc3d ends that run without taking the GUI down.
+Each tab's form is generated from its script's build_parser(), so any flag
+added to either CLI shows up here automatically with its default and help
+text (hover a field to see it). Layout follows the parser's argument groups:
+every checkbox is collected into one Options box, and each group becomes its
+own box with input fields and output fields (dest starting "output_") side by
+side. Scripts run as subprocesses rather than in-process, so a native crash in
+OpenSim/ezc3d ends that run without taking the GUI down.
 
 Launch from the Theia2OpenSim conda environment:
     python src/Python/run_pipeline_gui.py
@@ -24,16 +24,25 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
+from typing import Callable
 
-from run_pipeline import build_parser
+import align_outputs
+import run_pipeline
 from workflow_utils import DEFAULT_GCS_ROTATIONS
 
-PIPELINE_SCRIPT = Path(__file__).resolve().with_name("run_pipeline.py")
+PIPELINE_SCRIPT = Path(run_pipeline.__file__).resolve()
+ALIGN_SCRIPT = Path(align_outputs.__file__).resolve()
 INPUT_BG = "#ffffff"
 OUTPUT_BG = "#e6f2e6"
 OPTIONS_PER_ROW = 5
 GCS_ROTATION_SLOTS = 3
 AXIS_CHOICES = ("none", "X", "Y", "Z")
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_PLATE_COUNT_PROBE = (
+    "import sys, ezc3d\n"
+    "params = ezc3d.c3d(sys.argv[1])['parameters']\n"
+    "print(int(params['FORCE_PLATFORM']['USED']['value'][0]) if 'FORCE_PLATFORM' in params else 0)\n"
+)
 
 
 def _field_kind(action: argparse.Action) -> str:
@@ -41,6 +50,8 @@ def _field_kind(action: argparse.Action) -> str:
         return "flag"
     if action.metavar == "AXIS:DEG":
         return "rotation"
+    if action.metavar == "N:L|R":
+        return "plate_foot"
     if action.nargs == "*":
         return "list"
     if action.type is Path:
@@ -123,6 +134,11 @@ class _RotationField:
                 axis.set("none")
                 angle.set("")
 
+    def copy_from(self, other: _RotationField) -> None:
+        for (axis, angle), (other_axis, other_angle) in zip(self.slots, other.slots):
+            axis.set(other_axis.get())
+            angle.set(other_angle.get())
+
     def tokens(self) -> list[str]:
         tokens = []
         for index, (axis, angle) in enumerate(self.slots, start=1):
@@ -138,43 +154,171 @@ class _RotationField:
         return tokens
 
 
-class PipelineGui:
-    def __init__(self, root: tk.Tk):
-        self.root = root
+class _PlateFootField:
+    """Left/Right checkboxes per force plate, for --plate-foot.
+
+    One row per plate in the GRF C3D, re-read whenever that path changes.
+    The plate count is read in a subprocess (like the scripts themselves), so
+    a malformed C3D can't crash the GUI. Ticking one box unticks the other;
+    leaving both unticked keeps align_outputs' auto-detection for that plate.
+    """
+
+    def __init__(self, parent: tk.Widget, help_text: str | None, on_rows_changed: Callable[[], None]):
+        self.frame = ttk.Frame(parent)
+        self.help_text = help_text
+        self.on_rows_changed = on_rows_changed
+        self.status = ttk.Label(self.frame, foreground="#555555", wraplength=420)
+        self.status.pack(anchor="w")
+        self.grid = ttk.Frame(self.frame)
+        self.grid.pack(anchor="w")
+        self.rows: dict[int, tuple[tk.BooleanVar, tk.BooleanVar, list[tk.Widget]]] = {}
+        self.path_var: tk.StringVar | None = None
+        self.pending: str | None = None
+        self.probe_id = 0
+        self.results: queue.Queue[tuple[int, Path, int | None]] = queue.Queue()
+
+    def watch(self, path_var: tk.StringVar) -> None:
+        self.path_var = path_var
+        path_var.trace_add("write", lambda *_args: self._schedule())
+        self._schedule()
+
+    def _schedule(self) -> None:
+        # Debounced, so typing a path doesn't launch a probe per keystroke.
+        if self.pending is not None:
+            self.frame.after_cancel(self.pending)
+        self.pending = self.frame.after(400, self._probe)
+
+    def _probe(self) -> None:
+        self.pending = None
+        self.probe_id += 1
+        path = Path(self.path_var.get().strip())
+        if not path.is_file():
+            self._set_plates(0, "--grf-c3d not found -- set it to list its force plates here.")
+            return
+        self.status.configure(text=f"Reading force plates from {path.name}...")
+        threading.Thread(target=self._count_plates, args=(path, self.probe_id), daemon=True).start()
+        self.frame.after(100, self._poll)
+
+    def _count_plates(self, path: Path, probe_id: int) -> None:
+        try:
+            done = subprocess.run([sys.executable, "-c", _PLATE_COUNT_PROBE, str(path)], capture_output=True,
+                                  text=True, timeout=60, creationflags=CREATE_NO_WINDOW)
+            count = int(done.stdout.strip()) if done.returncode == 0 else None
+        except (subprocess.TimeoutExpired, ValueError):
+            count = None
+        self.results.put((probe_id, path, count))
+
+    def _poll(self) -> None:
+        # Each probe starts one poll loop and puts one result, so each loop
+        # consumes exactly one; results from a superseded path are dropped.
+        try:
+            probe_id, path, count = self.results.get_nowait()
+        except queue.Empty:
+            self.frame.after(100, self._poll)
+            return
+        if probe_id != self.probe_id:
+            return
+        if count is None:
+            self._set_plates(0, f"Couldn't read force plates from {path.name} -- is it a valid C3D?")
+        elif count == 0:
+            self._set_plates(0, f"No force plates in {path.name}.")
+        else:
+            self._set_plates(count, f"{count} plate(s) in {path.name}. Unticked = auto-detect.")
+
+    def _set_plates(self, count: int, message: str) -> None:
+        self.status.configure(text=message)
+        for plate in [p for p in self.rows if p > count]:
+            for widget in self.rows.pop(plate)[2]:
+                widget.destroy()
+        for plate in range(1, count + 1):
+            if plate in self.rows:
+                continue
+            left, right = tk.BooleanVar(), tk.BooleanVar()
+            label = ttk.Label(self.grid, text=f"Plate {plate}:")
+            left_box = ttk.Checkbutton(self.grid, text="Left", variable=left,
+                                       command=lambda on=left, other=right: on.get() and other.set(False))
+            right_box = ttk.Checkbutton(self.grid, text="Right", variable=right,
+                                        command=lambda on=right, other=left: on.get() and other.set(False))
+            label.grid(row=plate, column=0, sticky="w", padx=(0, 10), pady=1)
+            left_box.grid(row=plate, column=1, sticky="w", padx=(0, 16))
+            right_box.grid(row=plate, column=2, sticky="w")
+            for widget in (label, left_box, right_box):
+                _Tooltip(widget, self.help_text)
+            self.rows[plate] = (left, right, [label, left_box, right_box])
+        self.on_rows_changed()
+
+    def tokens(self) -> list[str]:
+        return [f"{plate}:{'L' if left.get() else 'R'}"
+                for plate, (left, right, _widgets) in sorted(self.rows.items()) if left.get() or right.get()]
+
+    def reset(self) -> None:
+        for left, right, _widgets in self.rows.values():
+            left.set(False)
+            right.set(False)
+
+
+class ScriptTab:
+    """One script's form, run controls, and live log, in a notebook tab."""
+
+    def __init__(self, parent: tk.Widget, build_parser: Callable[[], argparse.ArgumentParser],
+                 script: Path, description: str):
+        self.frame = ttk.Frame(parent, padding=(0, 6, 0, 0))
+        self.build_parser = build_parser
+        self.script = script
         # (action, kind, variable, entry widget or None). For kind "rotation"
         # the variable slot holds a _RotationField instead of a tk.Variable.
         self.fields: list[tuple[argparse.Action, str, tk.Variable | _RotationField, tk.Entry | None]] = []
         self.process: subprocess.Popen | None = None
         self.stopped = False
         self.output_queue: queue.Queue[str | int] = queue.Queue()
+        self.laid_out = False
 
-        root.title("Theia2OpenSim Pipeline")
-        root.geometry(f"1200x{min(950, root.winfo_screenheight() - 80)}")
-
-        self.paned = ttk.PanedWindow(root, orient="vertical")
-        self.paned.pack(fill="both", expand=True, padx=8, pady=8)
-        self.paned.add(self._build_form(self.paned), weight=3)
+        self.paned = ttk.PanedWindow(self.frame, orient="vertical")
+        self.paned.pack(fill="both", expand=True)
+        self.paned.add(self._build_form(self.paned, description), weight=3)
         self.paned.add(self._build_run_panel(self.paned), weight=2)
 
-        root.protocol("WM_DELETE_WINDOW", self.on_close)
+        # Plate rows follow whichever GRF C3D this tab's --grf-c3d points at.
+        for _action, kind, var, _entry in self.fields:
+            if kind == "plate_foot":
+                var.watch(self.var("grf_c3d"))
+
         # Sash position and Entry scrolling both need the real layout, which
-        # only exists once the window is drawn.
-        root.after(100, self._after_layout)
+        # a notebook tab only gets once it's first shown.
+        self.paned.bind("<Map>", lambda _e: self.frame.after(50, self._after_layout), add="+")
+
+    def var(self, dest: str) -> tk.Variable | _RotationField | _PlateFootField:
+        return next(var for action, _kind, var, _entry in self.fields if action.dest == dest)
 
     def _after_layout(self) -> None:
+        if self.laid_out:
+            return
+        if self.paned.winfo_height() <= 1:
+            self.frame.after(50, self._after_layout)
+            return
+        self.laid_out = True
+        self._fit_sash()
+        self.show_path_ends()
+
+    def _fit_sash(self) -> None:
         # Give the form the height it needs to show without scrolling, while
         # keeping at least ~150 px for the log.
+        if not self.laid_out:
+            return
+        self.frame.update_idletasks()
         wanted = self.form_header.winfo_reqheight() + self.form_inner.winfo_reqheight() + 12
         self.paned.sashpos(0, max(200, min(wanted, self.paned.winfo_height() - 150)))
-        # Long paths are most informative at their end (the filename), but an
-        # Entry shows the start.
-        self._show_path_ends()
 
-    def _build_form(self, parent: tk.Widget) -> ttk.Frame:
+    def _build_form(self, parent: tk.Widget, description: str) -> ttk.Frame:
         outer = ttk.Frame(parent)
-        self.form_header = ttk.Label(outer, text="Fields marked * are required. Output fields (files the pipeline "
-                                                 "writes) are shaded green. Hover any field for its description.")
-        self.form_header.pack(anchor="w", pady=(0, 4))
+        self.form_header = ttk.Frame(outer)
+        self.form_header.pack(fill="x", pady=(0, 4))
+        # Empty unless the app adds tab-level actions (e.g. "Fill from step 1").
+        self.top_bar = ttk.Frame(self.form_header)
+        self.top_bar.pack(anchor="w")
+        ttk.Label(self.form_header, text=description + "\nFields marked * are required. Output fields "
+                  "(files the script writes) are shaded green. Hover any field for its description."
+                  ).pack(anchor="w")
 
         canvas = tk.Canvas(outer, highlightthickness=0)
         scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
@@ -194,7 +338,7 @@ class PipelineGui:
         canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
 
         sections = []
-        for group in build_parser()._action_groups:
+        for group in self.build_parser()._action_groups:
             actions = [a for a in group._group_actions if a.option_strings and a.dest != "help"]
             if actions:
                 sections.append((group.title, actions))
@@ -251,6 +395,11 @@ class PipelineGui:
             rotation.frame.grid(row=row, column=1, columnspan=2, sticky="w", pady=2)
             self.fields.append((action, kind, rotation, None))
             return
+        if kind == "plate_foot":
+            plates = _PlateFootField(parent, action.help, on_rows_changed=self._fit_sash)
+            plates.frame.grid(row=row, column=1, columnspan=2, sticky="w", pady=2)
+            self.fields.append((action, kind, plates, None))
+            return
 
         var = tk.StringVar(value=_default_text(action))
         entry = tk.Entry(parent, textvariable=var, relief="solid", borderwidth=1,
@@ -264,15 +413,16 @@ class PipelineGui:
 
     def _build_run_panel(self, parent: tk.Widget) -> ttk.Frame:
         panel = ttk.Frame(parent)
-        buttons = ttk.Frame(panel)
-        buttons.pack(fill="x", pady=(0, 4))
-        self.run_button = ttk.Button(buttons, text="Run pipeline", command=self.run)
+        self.buttons = ttk.Frame(panel)
+        self.buttons.pack(fill="x", pady=(0, 4))
+        self.run_button = ttk.Button(self.buttons, text=f"Run {self.script.name}", command=self.run)
         self.run_button.pack(side="left")
-        self.stop_button = ttk.Button(buttons, text="Stop", command=self.stop, state="disabled")
+        self.stop_button = ttk.Button(self.buttons, text="Stop", command=self.stop, state="disabled")
         self.stop_button.pack(side="left", padx=4)
-        ttk.Button(buttons, text="Reset to defaults", command=self.reset).pack(side="left")
-        ttk.Button(buttons, text="Clear log", command=lambda: self.log.delete("1.0", "end")).pack(side="left", padx=4)
-        self.status = ttk.Label(buttons, text="Ready")
+        ttk.Button(self.buttons, text="Reset to defaults", command=self.reset).pack(side="left")
+        ttk.Button(self.buttons, text="Clear log",
+                   command=lambda: self.log.delete("1.0", "end")).pack(side="left", padx=4)
+        self.status = ttk.Label(self.buttons, text="Ready")
         self.status.pack(side="right")
 
         self.log = ScrolledText(panel, height=14, font=("Consolas", 9))
@@ -294,16 +444,18 @@ class PipelineGui:
             var.set(path)
             entry.xview_moveto(1.0)
 
-    def _show_path_ends(self) -> None:
+    def show_path_ends(self) -> None:
+        # Long paths are most informative at their end (the filename), but an
+        # Entry shows the start.
         for _action, kind, _var, entry in self.fields:
             if kind == "path":
                 entry.xview_moveto(1.0)
 
     def build_command(self) -> list[str]:
-        """Translate the form into a run_pipeline.py command line.
+        """Translate the form into a command line for this tab's script.
 
-        Empty optional fields are omitted, so run_pipeline.py falls back to its
-        own default for them -- same as leaving the flag off on the CLI.
+        Empty optional fields are omitted, so the script falls back to its own
+        default for them -- same as leaving the flag off on the CLI.
         """
         args: list[str] = []
         for action, kind, var, _entry in self.fields:
@@ -314,9 +466,16 @@ class PipelineGui:
                 continue
             if kind == "rotation":
                 # Always passed: with every slot "none" this is a bare
-                # --gcs-rot, which run_pipeline.py treats as no rotation.
+                # --gcs-rot, which both scripts treat as no rotation.
                 args.append(flag)
                 args.extend(var.tokens())
+                continue
+            if kind == "plate_foot":
+                # Omitted entirely when nothing's ticked: auto-detect every plate.
+                tokens = var.tokens()
+                if tokens:
+                    args.append(flag)
+                    args.extend(tokens)
                 continue
 
             text = var.get().strip()
@@ -335,7 +494,7 @@ class PipelineGui:
                     kind_name = "an integer" if action.type is int else "a number"
                     raise ValueError(f"{flag} must be {kind_name}, got {text!r}.") from None
             args.extend([flag, text])
-        return [sys.executable, "-u", str(PIPELINE_SCRIPT), *args]
+        return [sys.executable, "-u", str(self.script), *args]
 
     def run(self) -> None:
         try:
@@ -354,14 +513,14 @@ class PipelineGui:
             encoding="utf-8",
             errors="replace",
             env=dict(os.environ, PYTHONIOENCODING="utf-8"),
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            creationflags=CREATE_NO_WINDOW,
         )
         threading.Thread(target=self._read_output, args=(self.process,), daemon=True).start()
 
         self.run_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         self.status.configure(text="Running...")
-        self.root.after(100, self._poll_output)
+        self.frame.after(100, self._poll_output)
 
     def _read_output(self, process: subprocess.Popen) -> None:
         for line in process.stdout:
@@ -378,7 +537,7 @@ class PipelineGui:
                 self._finished(item)
                 return
             self._append(item)
-        self.root.after(100, self._poll_output)
+        self.frame.after(100, self._poll_output)
 
     def _finished(self, returncode: int) -> None:
         self.process = None
@@ -404,17 +563,80 @@ class PipelineGui:
 
     def reset(self) -> None:
         for action, kind, var, _entry in self.fields:
-            if kind == "rotation":
+            if kind in ("rotation", "plate_foot"):
                 var.reset()
             else:
                 var.set(bool(action.default) if kind == "flag" else _default_text(action))
-        self._show_path_ends()
+        self.show_path_ends()
+
+
+class PipelineGui:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        root.title("Theia2OpenSim")
+        root.geometry(f"1200x{min(950, root.winfo_screenheight() - 80)}")
+
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill="both", expand=True, padx=8, pady=8)
+        self.pipeline = ScriptTab(
+            self.notebook, run_pipeline.build_parser, PIPELINE_SCRIPT,
+            "Step 1: convert Theia3D C3D files into OpenSim inputs -- scaled model, kinematics .mot, "
+            "and (optionally) an unaligned GRF .mot.")
+        self.align = ScriptTab(
+            self.notebook, align_outputs.build_parser, ALIGN_SCRIPT,
+            "Step 2 (after step 1): align the kinematics and force C3Ds to their shared time window, then "
+            "write the ExternalLoads and Inverse Dynamics setup XMLs.\n"
+            "\"Fill from step 1\" copies the C3D files, rotation, force threshold, and scaled model "
+            "from the first tab, with output names based on those C3Ds.")
+        self.notebook.add(self.pipeline.frame, text="  1. Pipeline (run_pipeline.py)  ")
+        self.notebook.add(self.align.frame, text="  2. Align IK + GRF, ID setup (align_outputs.py)  ")
+        # A plain tk.Button, since the native Windows ttk theme ignores
+        # background colors on ttk buttons.
+        tk.Button(self.align.top_bar, text="Fill from step 1", command=self.fill_align_from_pipeline,
+                  background="#2f6fd6", foreground="white", activebackground="#2558aa",
+                  activeforeground="white", relief="flat", padx=12, pady=3, cursor="hand2",
+                  font=("Segoe UI", 9, "bold")).pack(side="left", pady=(0, 6))
+
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def fill_align_from_pipeline(self) -> None:
+        """Copy step 1's shared settings into step 2, so the two scripts can't
+        silently disagree on source files, rotation, or the scaled model.
+
+        Output names follow align_outputs.py's own default naming pattern,
+        based on the C3D stems, in the directory step 1 writes its .mot to --
+        so a new trial doesn't overwrite another trial's aligned files.
+        """
+        src, dst = self.pipeline, self.align
+        ik_c3d = src.var("c3d").get().strip()
+        grf_c3d = src.var("grf_c3d").get().strip()
+        if not ik_c3d or not grf_c3d:
+            messagebox.showerror("Fill from step 1", "Step 1 needs both --c3d and --grf-c3d filled in.")
+            return
+
+        dst.var("gcs_rot").copy_from(src.var("gcs_rot"))
+        for dst_dest, src_dest in (("ik_c3d", "c3d"), ("grf_c3d", "grf_c3d"),
+                                   ("grf_force_threshold", "grf_force_threshold"),
+                                   ("scaled_model", "output_osim")):
+            dst.var(dst_dest).set(src.var(src_dest).get())
+
+        out_dir = Path(src.var("output_mot").get().strip()).parent
+        ik_stem, grf_stem = Path(ik_c3d).stem, Path(grf_c3d).stem
+        for dest, name in (("output_ik_mot", f"{ik_stem}_aligned.mot"),
+                           ("output_grf_mot", f"{grf_stem}_grf_aligned.mot"),
+                           ("output_external_loads", f"{grf_stem}_external_loads.xml"),
+                           ("output_id_setup", f"{grf_stem}_inverse_dynamics_setup.xml")):
+            dst.var(dest).set(str(out_dir / name))
+        dst.show_path_ends()
+        dst.status.configure(text="Filled from step 1")
 
     def on_close(self) -> None:
-        if self.process is not None:
-            if not messagebox.askokcancel("Pipeline running", "A run is still in progress. Stop it and quit?"):
+        running = [tab for tab in (self.pipeline, self.align) if tab.process is not None]
+        if running:
+            if not messagebox.askokcancel("Script running", "A run is still in progress. Stop it and quit?"):
                 return
-            self.process.terminate()
+            for tab in running:
+                tab.process.terminate()
         self.root.destroy()
 
 
