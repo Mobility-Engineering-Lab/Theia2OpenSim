@@ -51,6 +51,7 @@ Theia2OpenSim/
     └── Python/
         ├── opensim_scaling.py
         ├── run_pipeline.py
+        ├── run_pipeline_gui.py
         ├── validate_workflow.py
         └── workflow_utils.py
 ```
@@ -102,6 +103,8 @@ package crash on import together.
 
 - `src/Python/run_pipeline.py`
   End-to-end pipeline: dynamic `.mot`, optional static `.trc`, optional scaling to `.osim`, in one command.
+- `src/Python/run_pipeline_gui.py`
+  Desktop (Tkinter) front end for `run_pipeline.py` -- same flags, set through a form instead of the command line.
 - `src/Python/validate_workflow.py`
   Validates required labels and generated motion-table integrity.
 - `src/Python/workflow_utils.py`
@@ -155,6 +158,40 @@ Current default paths in `run_pipeline.py`:
 - `--gcs-rot`: `Z:-90 X:-90` (see [Source GCS -> OpenSim GCS Rotation](#source-gcs---opensim-gcs-rotation))
 
 When static input is provided, scaling runs by default unless `--no-scale` is set.
+
+## Run From The GUI
+
+`run_pipeline_gui.py` exposes every `run_pipeline.py` flag as a form field, pre-filled with
+the script's defaults. Tkinter ships with Python, so there's nothing extra to install:
+
+```bash
+conda activate Theia2OpenSim
+python src/Python/run_pipeline_gui.py
+```
+
+- The form is split into boxes that match the sections of `run_pipeline.py --help`:
+  subject and coordinate system, generic model, static trial and scaling, dynamic trial,
+  and inverse dynamics (ground reaction forces). Inside each box, inputs are on the left
+  and outputs (files the pipeline writes, shaded green) are on the right. All on/off
+  switches (`--no-head`, `--no-grf`, ...) are collected in one **Options** box.
+- `--gcs-rot` is three ordered slots, each an axis (**none**, X, Y, Z) plus an angle in
+  degrees, applied first to last. Order matters: `Z -90 then X -90` is not the same as
+  `X -90 then Z -90`. Slots set to none are skipped, and all three on none means no
+  rotation. The slots start at the default, `Z -90 then X -90`.
+- Fields marked `*` are required (currently just `--subject-mass`); hover any field for its
+  description.
+- Input files have a **Browse...** button and outputs a **Save as...** button. Clearing an
+  optional field falls back to the script's own default, same as omitting the flag on the
+  command line.
+- **Run pipeline** shows the equivalent command line at the top of the log, so a GUI run can
+  be reproduced from the terminal, then streams the pipeline's output live.
+- The pipeline runs as a separate process, so **Stop** ends a run cleanly and a crash inside
+  OpenSim/ezc3d doesn't close the GUI.
+
+The form is built from `run_pipeline.py`'s own argument parser (`build_parser()`), so new
+CLI flags appear in the GUI automatically -- there's no second list of flags to maintain.
+Add a new flag to the matching `add_argument_group` in `build_parser()` and it lands in that
+box. Name output-path flags `--output-...` so they show up in the Outputs column.
 
 ## Common Examples
 

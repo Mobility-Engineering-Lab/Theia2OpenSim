@@ -27,7 +27,7 @@ from workflow_utils import (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     # -------------------------------------------------------------------------
     # USER: edit the default paths below to point to your own files,
     #       OR leave them as-is and pass paths on the command line instead
@@ -50,35 +50,52 @@ def parse_args() -> argparse.Namespace:
     default_output_grf_mot = Path(__file__).resolve().parents[2] / "sample_data" / "OpenSim_output" /"JoggingL1_ID_grf.mot"
 
     parser = argparse.ArgumentParser(description="Convert Theia3D C3D data into an OpenSim MOT file.")
-    parser.add_argument("--c3d", type=Path, default=default_c3d,
-                        help="Path to Theia3D dynamic C3D file.")
-    parser.add_argument("--output-mot", type=Path, default=default_out,
-                        help="Output .mot file path.")
-    parser.add_argument("--trim-zeros", action="store_true",
-                        help="Trim leading and trailing zeros per signal and rebase time.")
-    parser.add_argument("--static-c3d", type=Path,default=default_static_c3d,
+
+    # Each argument group is also one box in run_pipeline_gui.py, with its
+    # inputs and outputs (dest starting "output_") shown side by side.
+    subject = parser.add_argument_group("Subject and coordinate system")
+    # USER: measure this for your subject. There is deliberately no default --
+    #       the scaled model takes this as its total mass, so a wrong value
+    #       propagates straight into inverse-dynamics joint moments.
+    subject.add_argument("--subject-mass", type=float, required=True,
+                         help="Subject mass in kg (required). Sets the scaled model's total mass, "
+                              "which downstream inverse dynamics depends on.")
+    subject.add_argument("--gcs-rot", nargs="*", default=None, metavar="AXIS:DEG",
+        help=("Ordered axis-angle rotations transforming the source laboratory "
+              "GCS into the OpenSim GCS. " 'Example: --gcs-rot Z:-90 X:-90. '
+              "Up to three rotations may be specified. Omit the flag for the default "
+              "(Z:-90 X:-90); pass it with no values for no rotation."),)
+
+    model = parser.add_argument_group("Generic model")
+    model.add_argument("--scale-model", type=Path, default=default_scale_model,
+                       help="Generic (unscaled) .osim model file to scale.")
+    model.add_argument("--marker-set", type=Path, default=default_marker_set,
+                       help="OpenSim MarkerSet .xml file matching DEFAULT_TRC_MARKER_SEGMENT_MAP's marker names.")
+
+    static = parser.add_argument_group("Static trial and scaling")
+    static.add_argument("--static-c3d", type=Path,default=default_static_c3d,
         # USER: set to your dedicated static C3D file, e.g. "sample_data/c3d_trials/Static.c3d".
         #       Pass --no-static-c3d if you don't have one and want --static-frames
         #       (taken from the dynamic trial) instead.
                          help=("Path to a dedicated static C3D file for TRC generation and scaling. "
                               f"Defaults to {default_static_c3d}." ), )
-    parser.add_argument("--no-static-c3d",action="store_true",
+    static.add_argument("--no-static-c3d",action="store_true",
                         help="Ignore --static-c3d's default; use --static-frames against the dynamic trial "
                              "instead, or produce .mot only if --static-frames is also omitted.",)
-    parser.add_argument("--static-frames",type=str,default=None,
+    static.add_argument("--static-frames",type=str,default=None,
         # USER: choose a frame number (or range) where the subject is standing still,
         #       e.g. "300", "290:310", or "290,300,310".
                         help=( 'Frames to use for the static TRC (e.g. "300", "290:310", "290,300,310"). '
                                'Triggers TRC generation. Defaults to "300" when --static-c3d is provided alone.'),)
-    parser.add_argument("--output-trc", type=Path, default=default_static_trc,
+    static.add_argument("--output-trc", type=Path, default=default_static_trc,
                         help="Output static .trc file path.")
-    parser.add_argument("--repeat-static-frames", type=int, default=6,
+    static.add_argument("--repeat-static-frames", type=int, default=6,
                         help="Number of repeated frames written to the static .trc file.")
-    parser.add_argument("--no-scale", action="store_true",
+    static.add_argument("--no-scale", action="store_true",
                         help="Skip running OpenSim's Scale Tool. By default, the Scale Tool runs "
                              "automatically (via the OpenSim Python API) whenever a static source is "
                              "given (--static-c3d or --static-frames); pass this to opt out.")
-    parser.add_argument("--no-head", action="store_true",
+    static.add_argument("--no-head", action="store_true",
         # USER: pass this when head_4X4 isn't trustworthy for this subject/trial
         #       (check: some Theia captures report a constant identity transform for
         #       head_4X4 instead of NaN, i.e. it looks present but was never tracked --
@@ -87,37 +104,37 @@ def parse_args() -> argparse.Namespace:
         #       factor far from 1.0 and/or the largest marker error reported at HEAD.)
                         help="Drop the HEAD marker and torso scaling, reproducing scaling as it "
                              "behaved before HEAD-based torso scaling was added.")
-    parser.add_argument("--scale-model", type=Path, default=default_scale_model,
-                        help="Generic (unscaled) .osim model file to scale.")
-    parser.add_argument("--marker-set", type=Path, default=default_marker_set,
-                        help="OpenSim MarkerSet .xml file matching DEFAULT_TRC_MARKER_SEGMENT_MAP's marker names.")
-    parser.add_argument("--output-osim", type=Path, default=default_output_osim,
+    static.add_argument("--output-osim", type=Path, default=default_output_osim,
                         help="Output scaled .osim model file path.")
-    # USER: measure this for your subject. There is deliberately no default --
-    #       the scaled model takes this as its total mass, so a wrong value
-    #       propagates straight into inverse-dynamics joint moments.
-    parser.add_argument("--subject-mass", type=float, required=True,
-                        help="Subject mass in kg (required). Sets the scaled model's total mass, "
-                             "which downstream inverse dynamics depends on.")
-    parser.add_argument("--gcs-rot", nargs="*", default=None, metavar="AXIS:DEG",
-        help=("Ordered axis-angle rotations transforming the source laboratory "
-              "GCS into the OpenSim GCS. " 'Example: --gcs-rot Z:-90 X:-90. '
-              "Up to three rotations may be specified."),)
-    parser.add_argument("--grf-c3d", type=Path, default=default_grf_c3d,
+
+    dynamic = parser.add_argument_group("Dynamic trial (kinematics)")
+    dynamic.add_argument("--c3d", type=Path, default=default_c3d,
+                        help="Path to Theia3D dynamic C3D file.")
+    dynamic.add_argument("--output-mot", type=Path, default=default_out,
+                        help="Output .mot file path.")
+    dynamic.add_argument("--trim-zeros", action="store_true",
+                        help="Trim leading and trailing zeros per signal and rebase time.")
+
+    grf = parser.add_argument_group("Inverse dynamics (ground reaction forces)")
+    grf.add_argument("--grf-c3d", type=Path, default=default_grf_c3d,
                         help="Theia3D C3D file containing force-platform data, for ground-reaction-force "
                              "export. Independent of --c3d (see the USER note on default_grf_c3d above); "
                              "runs automatically whenever it resolves to a file that exists and reports "
                              "FORCE_PLATFORM data. Pass --no-grf to skip.")
-    parser.add_argument("--output-grf-mot", type=Path, default=default_output_grf_mot,
+    grf.add_argument("--output-grf-mot", type=Path, default=default_output_grf_mot,
                         help="Output ground-reaction-force .mot file path.")
-    parser.add_argument("--no-grf", action="store_true",
+    grf.add_argument("--no-grf", action="store_true",
                         help="Skip ground-reaction-force export even if --grf-c3d resolves.")
-    parser.add_argument("--grf-force-threshold", type=float, default=20.0,
+    grf.add_argument("--grf-force-threshold", type=float, default=20.0,
                         help="Vertical force (N) below which a force-platform sample is treated as "
                              "unloaded and zeroed (force, moment, torque, and center of pressure). "
                              "Needed because center of pressure is undefined at zero force and noisy "
                              "near it -- see build_grf_dataframe's docstring.")
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def main() -> int:
