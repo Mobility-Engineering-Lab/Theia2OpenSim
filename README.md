@@ -27,7 +27,9 @@ Theia2OpenSim/
 │   └── static1.trc
 ├── sample_data/
 │   ├── gait2392_simbody.osim
+│   ├── gait2392_simbody_downshift_pelvis.osim   (default --scale-model)
 │   ├── markerstheia.xml
+│   ├── markerstheia_downshift_pelvis.xml        (default --marker-set, has C7)
 │   ├── Scaling_Setup.xml
 │   ├── c3d_trials/
 │   │   ├── LJogging.c3d
@@ -152,12 +154,30 @@ Current default paths in `run_pipeline.py`:
 - `--output-mot`: `sample_data/OpenSim_output/Orientation_test_output/Hopping_BR_filt_rot_test_correct.mot`
 - `--static-c3d`: `sample_data/c3d_trials/Static.c3d`
 - `--output-trc`: `sample_data/OpenSim_output/Orientation_test_output/Static_rot_test_correct.trc`
-- `--scale-model`: `sample_data/gait2392_simbody.osim`
-- `--marker-set`: `sample_data/markerstheia.xml`
+- `--scale-model`: `sample_data/gait2392_simbody_downshift_pelvis.osim`
+- `--marker-set`: `sample_data/markerstheia_downshift_pelvis.xml`
 - `--output-osim`: `sample_data/OpenSim_output/Orientation_test_output/scaled_model_rot_test_correct.osim`
 - `--gcs-rot`: `Z:-90 X:-90` (see [Source GCS -> OpenSim GCS Rotation](#source-gcs---opensim-gcs-rotation))
 
-When static input is provided, scaling runs by default unless `--no-scale` is set.
+When static input is provided, scaling runs by default unless `--no-scale` is set (the
+pipeline then prints a `[WARN]` that no scaled `.osim` will be written). If the Scale Tool
+fails, the `.mot` outputs are still written but the run exits with code 1.
+
+Output paths given without their extension (`.trc`, `.osim`, `.mot`, or `.xml` for
+`align_outputs.py`) get it appended, with a `[NOTE]` -- OpenSim needs the extension to read
+the file back.
+
+With `--no-static-c3d` and no `--static-frames` there is no static source. The pipeline then
+writes only the kinematics `.mot` (and GRF `.mot`), with no static `.trc` and no scaled
+`.osim`. It prints a `[WARN]` at the start and end of the run saying so. To scale from the
+dynamic trial instead, pass `--static-frames` with frames where the subject is standing still
+(frame numbers start at 0). Out-of-range or malformed frames stop with a `[FAIL]` that
+gives the valid range.
+
+In the GUI, ticking `--no-static-c3d` greys out the `--static-c3d` box and its Browse button,
+and leaves them out of the command. The path is kept, so unticking brings it back. Clearing
+the `--static-c3d` box means "no static C3D", the same as ticking `--no-static-c3d`. If that leaves the run with no static source, the GUI asks for
+confirmation before running without scaling.
 
 ## Run From The GUI
 
@@ -183,7 +203,7 @@ python src/Python/run_pipeline_gui.py
   tab 1: subject and coordinate system, generic model, static trial and scaling, dynamic
   trial, and inverse dynamics). Inside each box, inputs are on the left
   and outputs (files the pipeline writes, shaded green) are on the right. All on/off
-  switches (`--no-head`, `--no-grf`, ...) are collected in one **Options** box.
+  switches (`--no-torso`, `--no-grf`, ...) are collected in one **Options** box.
 - `--gcs-rot` is three ordered slots, each an axis (**none**, X, Y, Z) plus an angle in
   degrees, applied first to last. Order matters: `Z -90 then X -90` is not the same as
   `X -90 then Z -90`. Slots set to none are skipped, and all three on none means no
@@ -262,12 +282,28 @@ Trim leading/trailing zero regions:
 python src/Python/run_pipeline.py --trim-zeros --subject-mass 70.0
 ```
 
-Skip HEAD-based torso scaling for a subject/trial where `head_4X4` isn't trustworthy
-(see [`--no-head`](#run_pipelinepy-flags) below):
+Skip torso scaling for a subject/trial where `torso_4X4` isn't trustworthy
+(see [`--no-torso`](#run_pipelinepy-flags) below):
 
 ```bash
-python src/Python/run_pipeline.py --no-head --subject-mass 70.0
+python src/Python/run_pipeline.py --no-torso --subject-mass 70.0
 ```
+
+### Torso scaling and Theia tracking checks
+
+The torso is scaled off the PELVIS-C7 span, where C7 is Theia's `torso_4X4` origin.
+`--marker-set` must contain a `C7` marker on `/bodyset/torso` (the default
+`markerstheia_downshift_pelvis.xml` does); otherwise the run fails before scaling.
+
+Theia can lose segments -- NaN when the subject is out of view, or a constant identity
+placeholder (seen for `head_4X4` in static captures). The pipeline checks this:
+
+- **Static frames:** if any segment the static TRC uses (pelvis, legs, feet, torso) is
+  untracked on a chosen `--static-frames` frame, the run fails and lists the frames.
+- **Head / upper body:** `head_4X4` is not used for anything, but if it (or `torso_4X4`)
+  is lost on frames where the pelvis is still tracked, a `[WARN]` lists them, for the static
+  frames and for the dynamic trial. Check the upper body in Theia for those frames. On them
+  the `.mot`'s lumbar angles are 0.
 
 ## Source GCS -> OpenSim GCS Rotation
 
@@ -300,9 +336,9 @@ one frame.
 | `--output-trc`           | `sample_data/OpenSim_output/Orientation_test_output/Static_rot_test_correct.trc` | Output static`.trc` path.                                                         |
 | `--repeat-static-frames` | `6`                                            | Number of repeated frames written to static`.trc`.                                |
 | `--no-scale`             | off                                              | Skip OpenSim Scale Tool run.                                                        |
-| `--no-head`              | off                                              | Drop the HEAD marker and torso scaling. Use when `head_4X4` isn't trustworthy for a subject/trial -- some Theia captures report it as a constant identity transform (never actually tracked) rather than NaN, which passes the required-label check silently but corrupts the torso scale factor and, since MarkerPlacer solves all markers jointly, distorts nearby joint placement too. Symptom: a torso scale factor far from 1.0 and/or the largest marker error reported at HEAD. |
-| `--scale-model`          | `sample_data/gait2392_simbody.osim`            | Generic model used as Scale Tool input.                                             |
-| `--marker-set`           | `sample_data/markerstheia.xml`                 | MarkerSet XML matching virtual marker names.                                        |
+| `--no-torso`             | off                                              | Drop the C7 marker, torso scaling, and the lumbar marker-placement tasks (torso stays at generic size). Use when `torso_4X4` isn't trustworthy for a subject/trial. A lost `head_4X4` alone doesn't need this -- it only triggers a warning. |
+| `--scale-model`          | `sample_data/gait2392_simbody_downshift_pelvis.osim` | Generic model used as Scale Tool input.                                             |
+| `--marker-set`           | `sample_data/markerstheia_downshift_pelvis.xml` | MarkerSet XML matching virtual marker names (needs `C7` unless `--no-torso`).                                        |
 | `--output-osim`          | `sample_data/OpenSim_output/Orientation_test_output/scaled_model_rot_test_correct.osim` | Output scaled`.osim` path.                                                        |
 | `--subject-mass`         | *(required)*                                   | Subject mass (kg). Sets the scaled model's total mass; always required, whether or not scaling runs, since downstream inverse dynamics depends on it. |
 | `--gcs-rot`              | `Z:-90 X:-90`                                  | Ordered `AXIS:DEG` rotations, source lab GCS -> OpenSim GCS (see [above](#source-gcs---opensim-gcs-rotation)). Up to three. |

@@ -28,7 +28,7 @@ from typing import Callable
 
 import align_outputs
 import run_pipeline
-from workflow_utils import DEFAULT_GCS_ROTATIONS
+from workflow_utils import DEFAULT_GCS_ROTATIONS, OUTPUT_EXTENSIONS
 
 PIPELINE_SCRIPT = Path(run_pipeline.__file__).resolve()
 ALIGN_SCRIPT = Path(align_outputs.__file__).resolve()
@@ -272,6 +272,9 @@ class ScriptTab:
         self.stopped = False
         self.output_queue: queue.Queue[str | int] = queue.Queue()
         self.laid_out = False
+        # Optional check run before each launch; returning False cancels it.
+        self.preflight: Callable[[], bool] | None = None
+        self.browse_buttons: dict[str, ttk.Button] = {}
 
         self.paned = ttk.PanedWindow(self.frame, orient="vertical")
         self.paned.pack(fill="both", expand=True)
@@ -283,12 +286,29 @@ class ScriptTab:
             if kind == "plate_foot":
                 var.watch(self.var("grf_c3d"))
 
+        # A "--no-X" checkbox greys out the "--X" field it switches off (e.g.
+        # --no-static-c3d -> --static-c3d), keeping its value for when it's
+        # unticked again.
+        entries = {action.dest: entry for action, _kind, _var, entry in self.fields if entry is not None}
+        for action, kind, var, _entry in self.fields:
+            target = action.dest[len("no_"):]
+            if kind == "flag" and action.dest.startswith("no_") and target in entries:
+                var.trace_add("write", lambda *_args, flag=var, dest=target: self._set_field_enabled(dest, not flag.get()))
+                self._set_field_enabled(target, not var.get())
+
         # Sash position and Entry scrolling both need the real layout, which
         # a notebook tab only gets once it's first shown.
         self.paned.bind("<Map>", lambda _e: self.frame.after(50, self._after_layout), add="+")
 
     def var(self, dest: str) -> tk.Variable | _RotationField | _PlateFootField:
         return next(var for action, _kind, var, _entry in self.fields if action.dest == dest)
+
+    def _set_field_enabled(self, dest: str, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        entry = next(entry for action, _kind, _var, entry in self.fields if action.dest == dest)
+        entry.configure(state=state)
+        if dest in self.browse_buttons:
+            self.browse_buttons[dest].configure(state=state)
 
     def _after_layout(self) -> None:
         if self.laid_out:
@@ -406,8 +426,10 @@ class ScriptTab:
                          background=OUTPUT_BG if output else INPUT_BG)
         entry.grid(row=row, column=1, sticky="ew", pady=2, ipady=2)
         if kind == "path":
-            ttk.Button(parent, text="Save as..." if output else "Browse...",
-                       command=lambda: self._browse(action, var, entry)).grid(row=row, column=2, padx=(4, 0))
+            button = ttk.Button(parent, text="Save as..." if output else "Browse...",
+                                command=lambda: self._browse(action, var, entry))
+            button.grid(row=row, column=2, padx=(4, 0))
+            self.browse_buttons[action.dest] = button
         _Tooltip(entry, action.help)
         self.fields.append((action, kind, var, entry))
 
@@ -437,6 +459,12 @@ class ScriptTab:
                 options["initialdir"] = str(current.parent)
             options["initialfile"] = current.name
         if _is_output(action):
+            # Without a default extension, a typed name is saved as-is (no .trc/.osim/...),
+            # which OpenSim then can't read back.
+            ext = OUTPUT_EXTENSIONS.get(action.dest)
+            if ext:
+                options["defaultextension"] = ext
+                options["filetypes"] = [(f"{ext} files", f"*{ext}"), ("All files", "*.*")]
             path = filedialog.asksaveasfilename(**options)
         else:
             path = filedialog.askopenfilename(**options)
@@ -458,7 +486,7 @@ class ScriptTab:
         default for them -- same as leaving the flag off on the CLI.
         """
         args: list[str] = []
-        for action, kind, var, _entry in self.fields:
+        for action, kind, var, entry in self.fields:
             flag = action.option_strings[-1]
             if kind == "flag":
                 if var.get():
@@ -478,6 +506,9 @@ class ScriptTab:
                     args.extend(tokens)
                 continue
 
+            if str(entry.cget("state")) == "disabled":
+                # Switched off by its "--no-X" checkbox, which is passed instead.
+                continue
             text = var.get().strip()
             if not text:
                 if action.required:
@@ -497,6 +528,8 @@ class ScriptTab:
         return [sys.executable, "-u", str(self.script), *args]
 
     def run(self) -> None:
+        if self.preflight is not None and not self.preflight():
+            return
         try:
             command = self.build_command()
         except ValueError as exc:
@@ -588,6 +621,7 @@ class PipelineGui:
             "write the ExternalLoads and Inverse Dynamics setup XMLs.\n"
             "\"Fill from step 1\" copies the C3D files, rotation, force threshold, and scaled model "
             "from the first tab, with output names based on those C3Ds.")
+        self.pipeline.preflight = self.check_static_source
         self.notebook.add(self.pipeline.frame, text="  1. Pipeline (run_pipeline.py)  ")
         self.notebook.add(self.align.frame, text="  2. Align IK + GRF, ID setup (align_outputs.py)  ")
         # A plain tk.Button, since the native Windows ttk theme ignores
@@ -598,6 +632,32 @@ class PipelineGui:
                   font=("Segoe UI", 9, "bold")).pack(side="left", pady=(0, 6))
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def check_static_source(self) -> bool:
+        """Before a step-1 run, make "no static source" explicit and confirmed.
+
+        An empty --static-c3d box would otherwise be dropped from the command,
+        so run_pipeline.py would silently fall back to its *default* static
+        file -- so empty is turned into a ticked --no-static-c3d instead. With
+        no static C3D and no --static-frames, nothing gets scaled; that's
+        only worth a run if the user really means it.
+        """
+        p = self.pipeline
+        no_static = p.var("no_static_c3d")
+        if not p.var("static_c3d").get().strip() and not no_static.get():
+            no_static.set(True)
+        if not no_static.get() or p.var("static_frames").get().strip() or p.var("no_scale").get():
+            return True
+        return messagebox.askyesno(
+            "No static trial",
+            "No static trial is set: --static-c3d is empty or --no-static-c3d is ticked, and "
+            "--static-frames is empty.\n\n"
+            "The model will NOT be scaled -- no static .trc and no scaled .osim will be written, "
+            "only the kinematics .mot (and GRF .mot).\n\n"
+            "To scale from the dynamic trial instead, click No and enter frames where the subject "
+            "is standing still in --static-frames (e.g. 10:20).\n\n"
+            "Run without scaling?",
+            icon="warning", default="no")
 
     def fill_align_from_pipeline(self) -> None:
         """Copy step 1's shared settings into step 2, so the two scripts can't

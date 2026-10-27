@@ -29,6 +29,7 @@ from opensim_scaling import write_external_loads_xml, write_inverse_dynamics_set
 from workflow_utils import (
     DEFAULT_GCS_ROTATIONS,
     REQUIRED_ROTATION_LABELS,
+    add_missing_output_extensions,
     align_ik_and_grf_dataframes,
     build_gcs_to_opensim_rotation,
     build_grf_dataframe,
@@ -120,6 +121,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    add_missing_output_extensions(args)
 
     gcs_rotations = list(DEFAULT_GCS_ROTATIONS) if args.gcs_rot is None else parse_axis_angle_rotations(args.gcs_rot)
     gcs_to_opensim_R = build_gcs_to_opensim_rotation(gcs_rotations)

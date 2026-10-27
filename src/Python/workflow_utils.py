@@ -11,10 +11,12 @@ import pandas as pd
 from ezc3d import c3d
 from pyomeca import Angles, Rototrans
 
+# head_4X4 is deliberately not required: nothing is built from it any more
+# (torso scaling uses C7 = torso_4X4). run_pipeline.py only checks it, as a
+# warning sign that Theia may have lost the upper body -- see HEAD_ROTATION_LABEL.
 REQUIRED_ROTATION_LABELS = [
     "pelvis_4X4",
     "torso_4X4",
-    "head_4X4",
     "l_thigh_4X4",
     "l_shank_4X4",
     "l_foot_4X4",
@@ -24,6 +26,7 @@ REQUIRED_ROTATION_LABELS = [
     "r_toes_4X4",
     "l_toes_4X4",
 ]
+HEAD_ROTATION_LABEL = "head_4X4"
 
 
 class WorkflowValidationError(RuntimeError):
@@ -33,6 +36,31 @@ DEFAULT_GCS_ROTATIONS = (
     ("Z", -90.0),
     ("X", -90.0),
 )
+
+# Required extension for each output argument (argparse dest) of run_pipeline.py
+# and align_outputs.py, also used by run_pipeline_gui.py's Save-as dialogs.
+# OpenSim picks its file reader from the extension -- e.g. a static TRC saved
+# without ".trc" makes the Scale Tool fail with "Marker file type is unsupported".
+OUTPUT_EXTENSIONS = {
+    "output_trc": ".trc",
+    "output_osim": ".osim",
+    "output_mot": ".mot",
+    "output_grf_mot": ".mot",
+    "output_ik_mot": ".mot",
+    "output_external_loads": ".xml",
+    "output_id_setup": ".xml",
+}
+
+
+def add_missing_output_extensions(args) -> None:
+    """Append OUTPUT_EXTENSIONS' extension to any output path in args lacking it (in place)."""
+    for dest, ext in OUTPUT_EXTENSIONS.items():
+        path = getattr(args, dest, None)
+        if path is None or Path(path).suffix.lower() == ext:
+            continue
+        fixed = Path(path).with_name(Path(path).name + ext)
+        print(f"[NOTE] --{dest.replace('_', '-')} has no {ext} extension; writing {fixed.name} instead.")
+        setattr(args, dest, fixed)
 
 
 def _axis_rotation_matrix(axis: str, angle_deg: float) -> np.ndarray:
@@ -825,12 +853,32 @@ DEFAULT_TRC_MARKER_SEGMENT_MAP = {
     "RTOE": "r_toes_4X4",
     "LTOE": "l_toes_4X4",
     "PELVIS": "pelvis_4X4",
-    # HEAD drives the torso measurement. Theia's torso_4X4 origin sits at
-    # ~C7, only ~94 mm below head_4X4, so a TORSO-HEAD pair is far too short
-    # to derive a stable scale factor from. The PELVIS-HEAD span (~523 mm) is
-    # used instead -- see the "torso" Measurement in opensim_scaling.
-    "HEAD": "head_4X4",
+    # C7 drives the torso measurement (PELVIS-C7, see the "torso" Measurement
+    # in opensim_scaling): Theia's torso_4X4 origin sits at ~C7. This replaced
+    # PELVIS-HEAD, because static captures often never track head_4X4 (a
+    # constant identity placeholder) while torso_4X4 is still tracked.
+    "C7": "torso_4X4",
 }
+
+
+def get_segment_tracked_mask(c3d_obj: Dict, segment_label: str) -> np.ndarray:
+    """
+    Return a per-frame boolean array: True where Theia actually tracked the segment.
+
+    Untracked frames come in two forms, both with a zero origin after
+    get_segment_pose: NaN (the subject is out of view -- get_segment_pose
+    zeroes NaNs), and a constant identity placeholder (seen for head_4X4 in
+    static captures, which looks present but was never tracked).
+    """
+    pose = get_segment_pose(c3d_obj, segment_label)
+    return ~np.all(pose[:3, 3, :] == 0, axis=0)
+
+
+def format_frame_list(frames: Iterable[int], limit: int = 10) -> str:
+    """Compact "1, 2, 5, ... (+N more)" text for frame-index messages."""
+    frames = [int(f) for f in frames]
+    text = ", ".join(str(f) for f in frames[:limit])
+    return text + (f", ... (+{len(frames) - limit} more)" if len(frames) > limit else "")
 
 
 def parse_frame_indices(frame_spec: str) -> np.ndarray:
@@ -989,6 +1037,37 @@ def write_static_trc_from_c3d(
         repeat_frames=repeat_frames,
         units="mm",
     )
+
+
+def build_static_coords_dataframe(
+    mot_df: pd.DataFrame,
+    frame_indices: Iterable[int],
+    repeat_frames: int,
+    frame_rate: float,
+) -> pd.DataFrame:
+    """
+    Reduce a build_mot_dataframe table to the static pose of write_static_trc_from_c3d.
+
+    The static TRC averages the selected frames into one pose repeated
+    repeat_frames times from t = 0, and MarkerPlacer reads its coordinate file
+    over that same time range -- so the coordinates must be averaged and
+    repeated the same way, or MarkerPlacer solves against a different pose
+    (whatever the trial was doing at t = 0) than the TRC's markers describe.
+    """
+    rows = mot_df.iloc[np.asarray(list(frame_indices), dtype=int)]
+    means = {}
+    for name in mot_df.columns:
+        if name == "time":
+            continue
+        values = rows[name].to_numpy(dtype=float)
+        if not name.endswith(("_tx", "_ty", "_tz")):
+            # Angles (degrees): unwrap first so frames either side of +/-180 average correctly.
+            values = np.degrees(np.unwrap(np.radians(values)))
+        means[name] = values.mean()
+
+    static_df = pd.DataFrame({name: np.full(repeat_frames, value) for name, value in means.items()})
+    static_df.insert(0, "time", np.arange(repeat_frames, dtype=float) / float(frame_rate))
+    return static_df[list(mot_df.columns)]
 
 
 def write_mot(df: pd.DataFrame, output_path: str | Path, in_degrees: bool = True) -> Path:

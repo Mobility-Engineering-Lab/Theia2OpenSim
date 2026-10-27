@@ -34,14 +34,14 @@ from typing import NamedTuple, Sequence
 import opensim as osim
 
 # Marker-pair measurements for gait2392-style measurement-based scaling.
-# Each entry: (measurement name, marker pairs, body scales). HEAD scales the
-# torso off the PELVIS-HEAD span -- see workflow_utils.DEFAULT_TRC_MARKER_SEGMENT_MAP
-# for why TORSO-HEAD (~94 mm) is too short to use directly. foot r/l each
+# Each entry: (measurement name, marker pairs, body scales). The torso scales
+# off the PELVIS-C7 span (C7 = Theia's torso_4X4 origin) -- see
+# workflow_utils.DEFAULT_TRC_MARKER_SEGMENT_MAP for why not HEAD. foot r/l each
 # scale their own side's talus; scaling talus_l off the right foot pair was a
 # past bug, fixed here.
 _MEASUREMENTS: tuple[tuple[str, tuple[tuple[str, str], ...], tuple[tuple[str, str], ...]], ...] = (
     ("pelvis",  (("LASIS", "RASIS"),),  (("pelvis", "XYZ"),)),
-    ("torso",   (("PELVIS", "HEAD"),),  (("torso", "XYZ"),)),
+    ("torso",   (("PELVIS", "C7"),),    (("torso", "XYZ"),)),
     ("femur r", (("RASIS", "RKNEE"),),  (("femur_r", "XYZ"),)),
     ("femur l", (("LASIS", "LKNEE"),),  (("femur_l", "XYZ"),)),
     ("tibia r", (("RKNEE", "RANKLE"),), (("tibia_r", "XYZ"),)),
@@ -51,17 +51,19 @@ _MEASUREMENTS: tuple[tuple[str, tuple[tuple[str, str], ...], tuple[tuple[str, st
 )
 
 _IK_MARKER_TASKS: tuple[str, ...] = (
-    "LASIS", "RASIS", "RKNEE", "LKNEE", "RTOE", "LANKLE", "LTOE", "RANKLE", "PELVIS", "HEAD",
+    "LASIS", "RASIS", "RKNEE", "LKNEE", "RTOE", "LANKLE", "LTOE", "RANKLE", "PELVIS", "C7",
 )
 _IK_MARKER_WEIGHT = 5.0
+# Markers that exist only for torso scaling, dropped when include_torso=False.
+TORSO_MARKER_NAMES = frozenset({"C7"})
 
 # (coordinate name, value_type). Weight is uniformly 100 for every coordinate
 # task. subtalar_angle_r/l have no reliable Theia-derived value, so they stay
 # at their model default rather than being driven from the coordinate file;
 # every other coordinate -- including the three lumbar ones, which need a
-# task now that HEAD gives MarkerPlacer something to solve the torso
+# task now that C7 gives MarkerPlacer something to solve the torso
 # against -- is read from the static coordinate .mot. The three lumbar
-# entries are dropped along with HEAD/torso when include_head=False (see
+# entries are dropped along with C7/torso when include_torso=False (see
 # build_scale_tool): _LUMBAR_COORDINATE_NAMES marks which ones.
 _LUMBAR_COORDINATE_NAMES = frozenset({"lumbar_extension", "lumbar_bending", "lumbar_rotation"})
 
@@ -98,6 +100,12 @@ _MARKER_ERROR_RE = re.compile(
 )
 
 
+def read_marker_names(marker_set_file: str | Path) -> set[str]:
+    """Names of the markers in an OpenSim MarkerSet XML."""
+    marker_set = osim.MarkerSet(_abs(marker_set_file))
+    return {marker_set.get(i).getName() for i in range(marker_set.getSize())}
+
+
 def _abs(path: str | Path) -> str:
     return str(Path(path).resolve())
 
@@ -126,7 +134,7 @@ def build_scale_tool(
     mass: float,
     subject_name: str = "theia2opensim-scaled",
     output_motion_file: str | Path | None = None,
-    include_head: bool = True,
+    include_torso: bool = True,
 ) -> osim.ScaleTool:
     """Build an in-memory ScaleTool for gait2392-style measurement scaling.
 
@@ -138,17 +146,11 @@ def build_scale_tool(
     mass is required: it becomes the scaled model's total mass, and every
     downstream inverse-dynamics result scales with it.
 
-    include_head=False drops the "torso" measurement, the HEAD IK marker
-    task, and the three lumbar IK coordinate tasks, reproducing scaling as it
-    behaved before HEAD-based torso scaling was added. Theia's head_4X4 is
-    not always reliable -- some captures report it as a constant identity
-    placeholder (never actually tracked) rather than NaN, which passes the
-    required-label and gap checks silently but corrupts the torso scale
-    factor and, because MarkerPlacer solves all markers jointly, distorts
-    nearby joint placement too. Pass include_head=False for any subject/trial
-    where head_4X4 isn't trustworthy; marker_file must then also be built
-    without a HEAD marker (see the marker_segment_map argument to
-    workflow_utils.write_static_trc_from_c3d).
+    include_torso=False drops the "torso" measurement, the C7 IK marker task,
+    and the three lumbar IK coordinate tasks, leaving the torso at its generic
+    size. Use it for any subject/trial where torso_4X4 isn't trustworthy;
+    marker_file must then also be built without a C7 marker (see the
+    marker_segment_map argument to workflow_utils.write_static_trc_from_c3d).
     """
     if not mass > 0:
         raise ValueError(f"Subject mass must be positive, got {mass!r} kg.")
@@ -174,7 +176,7 @@ def build_scale_tool(
 
     measurement_set = scaler.getMeasurementSet()
     for name, marker_pairs, body_scales in _MEASUREMENTS:
-        if name == "torso" and not include_head:
+        if name == "torso" and not include_torso:
             continue
         measurement = osim.Measurement()
         measurement.setName(name)
@@ -218,7 +220,7 @@ def build_scale_tool(
 
     ik_task_set = placer.getIKTaskSet()
     for marker_name in _IK_MARKER_TASKS:
-        if marker_name == "HEAD" and not include_head:
+        if marker_name in TORSO_MARKER_NAMES and not include_torso:
             continue
         marker_task = osim.IKMarkerTask()
         marker_task.setName(marker_name)
@@ -228,7 +230,7 @@ def build_scale_tool(
         marker_task.thisown = False
 
     for coord_name, value_type in _IK_COORDINATE_TASKS:
-        if coord_name in _LUMBAR_COORDINATE_NAMES and not include_head:
+        if coord_name in _LUMBAR_COORDINATE_NAMES and not include_torso:
             continue
         coord_task = osim.IKCoordinateTask()
         coord_task.setName(coord_name)
@@ -269,7 +271,7 @@ def run_scale_tool(
     subject_name: str = "theia2opensim-scaled",
     output_motion_file: str | Path | None = None,
     setup_xml_path: str | Path | None = None,
-    include_head: bool = True,
+    include_torso: bool = True,
 ) -> ScaleToolResult:
     """Build a ScaleTool via build_scale_tool and run it through the OpenSim
     Python API.
@@ -282,8 +284,8 @@ def run_scale_tool(
     captured through a temporary Logger file sink rather than scraped from a
     subprocess's stdout.
 
-    include_head is forwarded to build_scale_tool -- see its docstring.
-    marker_file must be built to match (no HEAD marker) when False.
+    include_torso is forwarded to build_scale_tool -- see its docstring.
+    marker_file must be built to match (no C7 marker) when False.
     """
     output_model_file = Path(output_model_file)
 
@@ -297,7 +299,7 @@ def run_scale_tool(
         mass=mass,
         subject_name=subject_name,
         output_motion_file=output_motion_file,
-        include_head=include_head,
+        include_torso=include_torso,
     )
 
     if setup_xml_path is not None:
