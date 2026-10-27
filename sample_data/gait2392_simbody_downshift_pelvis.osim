@@ -9606,7 +9606,7 @@
 					<!--The fixed location of the station expressed in its parent frame.-->
 					<location>-0.020098604261875153 0.41733825206756592 0</location>
 					<!--Flag (true or false) specifying whether the marker is fixed in its parent frame during the marker placement step of scaling.  If false, the marker is free to move within its parent Frame to match its experimental counterpart.-->
-					<fixed>false</fixed>
+					<fixed>true</fixed>
 				</Marker>				
 				<Marker name="PELVIS">
 					<!--Path to a Component that satisfies the Socket 'parent_frame' of type PhysicalFrame (description: The frame to which this station is fixed.).-->
@@ -9614,7 +9614,7 @@
 					<!--The fixed location of the station expressed in its parent frame.-->
 					<location>-0.084048 0.023288 0.000000</location>
 					<!--Flag (true or false) specifying whether the marker is fixed in its parent frame during the marker placement step of scaling.  If false, the marker is free to move within its parent Frame to match its experimental counterpart.-->
-					<fixed>false</fixed>
+					<fixed>true</fixed>
 				</Marker>
 			</objects>
 			<groups />
